@@ -118,6 +118,16 @@ function setupJT808Handlers(serverInstance, portName) {
     broadcastBinary(frame.data);
   });
 
+  serverInstance.on('audio_frame', (audioFrame) => {
+    broadcastJson({
+      type: 'dashcam_audio',
+      simNo: audioFrame.simNo,
+      channel: audioFrame.channel,
+      pt: audioFrame.pt,
+      data: audioFrame.data.toString('base64')
+    });
+  });
+
   serverInstance.on('device_registered', ({ simNo, authCode }) => {
     console.log(`[JT808:${portName}] Device Registered: ${simNo}`);
     broadcastJson({
@@ -202,7 +212,7 @@ wss.on('connection', (ws) => {
 });
 
 async function handleWsClientMessage(clientWs, data) {
-  const { action, simNo, channel = 1, streamType = 0, customIp, mediaPort } = data;
+  const { action, simNo, channel = 1, streamType = 0, customIp, mediaPort, audioData } = data;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
   const videoMediaIp = customIp || publicIp || localServerIp;
   const videoMediaPort = parseInt(mediaPort || DEFAULT_MEDIA_PORT, 10);
@@ -216,20 +226,16 @@ async function handleWsClientMessage(clientWs, data) {
       try {
         console.log(`[Command] Switching/Starting Live Video on ${simNo} (Target: ${videoMediaIp}:${videoMediaPort}, Channel:${channel})...`);
         
-        // 1. Send stop command (0x9102) to reset existing channel stream
         try {
           targetServer.stopLiveVideo(simNo, 0);
         } catch (e) {}
 
-        // 2. Wait 200ms for hardware sensor switch
         await new Promise(r => setTimeout(r, 200));
 
-        // 3. Force Wakeup / Disable Sleep Mode (0x8103)
         try {
           targetServer.disableSleepMode(simNo);
         } catch (e) {}
 
-        // 4. Request Live Video Stream on requested Channel (0x9101)
         const reqResult = targetServer.requestLiveVideo(simNo, {
           serverIp: videoMediaIp,
           tcpPort: videoMediaPort,
@@ -249,6 +255,45 @@ async function handleWsClientMessage(clientWs, data) {
           type: 'error',
           message: err.message
         }));
+      }
+      break;
+    }
+
+    case 'start_talkback': {
+      try {
+        console.log(`[Talkback] Enabling Two-way Audio Intercom with ${simNo}...`);
+        const reqResult = targetServer.requestLiveVideo(simNo, {
+          serverIp: videoMediaIp,
+          tcpPort: videoMediaPort,
+          udpPort: 0,
+          channel: parseInt(channel, 10),
+          dataType: 2, // 2: Two-way Talkback Intercom (双向对讲)
+          streamType: 1
+        });
+
+        clientWs.send(JSON.stringify({
+          type: 'talkback_started',
+          simNo,
+          channel: parseInt(channel, 10),
+          ...reqResult
+        }));
+      } catch (err) {
+        clientWs.send(JSON.stringify({
+          type: 'error',
+          message: err.message
+        }));
+      }
+      break;
+    }
+
+    case 'talkback_audio': {
+      if (audioData) {
+        try {
+          const pcmBuf = Buffer.from(audioData, 'base64');
+          targetServer.sendAudioFrame(simNo, pcmBuf, parseInt(channel, 10));
+        } catch (e) {
+          console.warn('Audio send error:', e.message);
+        }
       }
       break;
     }

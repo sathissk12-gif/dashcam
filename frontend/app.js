@@ -1,6 +1,6 @@
 /**
  * Dashcam Command Center Frontend Application
- * Ultra-Low-Latency H.264 Live Stream Player & GPS Live Tracking
+ * Ultra-Low-Latency H.264 Live Stream Player, Two-Way Audio Talkback & GPS Live Tracking
  */
 
 // State
@@ -18,6 +18,12 @@ let currentChannel = 1;
 let lastFpsTime = Date.now();
 let hasSeenKeyframe = false;
 
+// Audio Talkback State
+let audioContext = null;
+let micStream = null;
+let audioProcessor = null;
+let isTalking = false;
+
 // DOM Elements
 const playerEl = document.getElementById('player');
 const videoOverlay = document.getElementById('videoOverlay');
@@ -33,6 +39,8 @@ const startLiveBtn = document.getElementById('startLiveBtn');
 const stopLiveBtn = document.getElementById('stopLiveBtn');
 const btnFrontCam = document.getElementById('btnFrontCam');
 const btnCabinCam = document.getElementById('btnCabinCam');
+const talkbackBtn = document.getElementById('talkbackBtn');
+const talkbackStatus = document.getElementById('talkbackStatus');
 const simControlBtn = document.getElementById('simControlBtn');
 const simBtnText = document.getElementById('simBtnText');
 const logsContainer = document.getElementById('logsContainer');
@@ -86,8 +94,8 @@ function initJMuxer() {
   jmuxer = new JMuxer({
     node: 'player',
     mode: 'video',
-    flushingTime: 0,          // 0ms = Instant flush for real-time live streaming (No lag/freeze)
-    clearBuffer: true,        // Prevent buffer bloat
+    flushingTime: 0,
+    clearBuffer: true,
     fps: 25,
     debug: false,
     onError: function(data) {
@@ -95,12 +103,10 @@ function initJMuxer() {
     }
   });
 
-  // Low-latency buffer catch-up handler
   playerEl.addEventListener('timeupdate', () => {
     if (playerEl.buffered && playerEl.buffered.length > 0) {
       const bufferEnd = playerEl.buffered.end(playerEl.buffered.length - 1);
       const lag = bufferEnd - playerEl.currentTime;
-      // If video playhead is lagging more than 0.3s behind live edge, jump to live edge
       if (lag > 0.35) {
         playerEl.currentTime = bufferEnd - 0.05;
       }
@@ -143,7 +149,6 @@ function connectWebSocket() {
 }
 
 function isH264Keyframe(uint8) {
-  // Check for NAL types 7 (SPS), 8 (PPS), or 5 (IDR Keyframe)
   for (let i = 0; i < Math.min(uint8.length - 4, 64); i++) {
     if (uint8[i] === 0x00 && uint8[i + 1] === 0x00 && (uint8[i + 2] === 0x01 || (uint8[i + 2] === 0x00 && uint8[i + 3] === 0x01))) {
       const nalByte = uint8[i + 2] === 0x01 ? uint8[i + 3] : uint8[i + 4];
@@ -160,11 +165,9 @@ function handleVideoFrame(arrayBuffer) {
   frameCount++;
   const uint8 = new Uint8Array(arrayBuffer);
 
-  // Check if frame is Keyframe
   if (!hasSeenKeyframe) {
     if (isH264Keyframe(uint8)) {
       hasSeenKeyframe = true;
-      console.log('✅ Keyframe received! Starting smooth playback.');
     }
   }
 
@@ -223,6 +226,10 @@ function handleJsonMessage(msg) {
       setStreamingState(true);
       if (msg.channel) updateChannelUI(msg.channel);
       addLog(`[JT1078] Live video stream request sent (Ch: ${msg.channel || currentChannel})`, 'log-out');
+      break;
+
+    case 'talkback_started':
+      addLog(`[JT1078] Two-Way Talkback Audio Enabled (Ch: ${msg.channel})`, 'log-out');
       break;
 
     case 'stream_stopped':
@@ -392,6 +399,113 @@ function requestStream(channel) {
     }));
   }
   overlayText.textContent = `Streaming Camera Channel ${channel} (Live)...`;
+}
+
+// 🎤 Two-Way Talkback Microphone Functions
+async function startTalkback() {
+  const simNo = deviceSelect.value;
+  if (!simNo) {
+    alert('Please select a connected dashcam first.');
+    return;
+  }
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 8000,
+        echoCancellation: true,
+        noiseSuppression: true
+      }
+    });
+
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
+    const source = audioContext.createMediaStreamSource(micStream);
+    audioProcessor = audioContext.createScriptProcessor(512, 1, 1);
+
+    source.connect(audioProcessor);
+    audioProcessor.connect(audioContext.destination);
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        action: 'start_talkback',
+        simNo,
+        channel: currentChannel
+      }));
+    }
+
+    audioProcessor.onaudioprocess = (e) => {
+      if (!isTalking) return;
+      const inputData = e.inputBuffer.getChannelData(0);
+      
+      // Convert Float32Array [-1.0, 1.0] to 16-bit PCM Buffer
+      const pcm16 = new Int16Array(inputData.length);
+      for (let i = 0; i < inputData.length; i++) {
+        let s = Math.max(-1, Math.min(1, inputData[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+
+      // Convert to Base64 and send via WebSocket
+      const bytes = new Uint8Array(pcm16.buffer);
+      let binaryStr = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binaryStr += String.fromCharCode(bytes[i]);
+      }
+      const b64Audio = btoa(binaryStr);
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          action: 'talkback_audio',
+          simNo,
+          channel: currentChannel,
+          audioData: b64Audio
+        }));
+      }
+    };
+
+    isTalking = true;
+    talkbackBtn.style.background = '#dc2626';
+    talkbackBtn.innerHTML = '<i class="fa-solid fa-microphone-lines"></i> 🔴 TRANSMITTING VOICE (Click to Stop)';
+    talkbackStatus.textContent = 'Transmitting Voice...';
+    talkbackStatus.style.color = '#ef4444';
+    addLog('[TALKBACK] Microphone active. Transmitting voice to Dashcam speaker...', 'log-out');
+
+  } catch (err) {
+    alert('Microphone access error: ' + err.message);
+    stopTalkback();
+  }
+}
+
+function stopTalkback() {
+  isTalking = false;
+  if (audioProcessor) {
+    audioProcessor.disconnect();
+    audioProcessor = null;
+  }
+  if (micStream) {
+    micStream.getTracks().forEach(track => track.stop());
+    micStream = null;
+  }
+  if (audioContext) {
+    audioContext.close();
+    audioContext = null;
+  }
+
+  talkbackBtn.style.background = '#059669';
+  talkbackBtn.innerHTML = '<i class="fa-solid fa-microphone"></i> Hold to Talk / Start Two-Way Audio';
+  talkbackStatus.textContent = 'Mic Idle';
+  talkbackStatus.style.color = '#94a3b8';
+  addLog('[TALKBACK] Voice transmission stopped.', 'log-out');
+}
+
+if (talkbackBtn) {
+  talkbackBtn.addEventListener('click', () => {
+    if (isTalking) {
+      stopTalkback();
+    } else {
+      startTalkback();
+    }
+  });
 }
 
 startLiveBtn.addEventListener('click', () => {

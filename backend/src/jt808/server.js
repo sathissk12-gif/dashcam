@@ -1,6 +1,7 @@
 const net = require('net');
 const EventEmitter = require('events');
 const { parseJT808Frame, buildJT808Packet, parseLocationReport, bcdToString } = require('./codec');
+const { encodePcmToAlaw, buildJT1078AudioPacket } = require('../jt1078/audio');
 
 class JT808Server extends EventEmitter {
   constructor(options = {}) {
@@ -8,6 +9,7 @@ class JT808Server extends EventEmitter {
     this.port = options.port || 7788;
     this.devices = new Map();
     this.serverSeq = 0;
+    this.audioSeq = 0;
     this.frameAssemblers = new Map();
     this.lastSpsPpsMap = new Map();
   }
@@ -15,6 +17,11 @@ class JT808Server extends EventEmitter {
   getNextSeq() {
     this.serverSeq = (this.serverSeq + 1) & 0xffff;
     return this.serverSeq;
+  }
+
+  getNextAudioSeq() {
+    this.audioSeq = (this.audioSeq + 1) & 0xffff;
+    return this.audioSeq;
   }
 
   findJt1078Sync(buf) {
@@ -64,7 +71,7 @@ class JT808Server extends EventEmitter {
                 const packet = rxBuffer.subarray(0, totalLen);
                 rxBuffer = rxBuffer.subarray(totalLen);
 
-                this.handleJt1078Packet(packet, { headerLen, bodyLen, dataType, subpackage, isVideo });
+                this.handleJt1078Packet(packet, { headerLen, bodyLen, dataType, subpackage, isVideo, isAudio });
                 continue;
               } catch (e) {
                 rxBuffer = rxBuffer.subarray(4);
@@ -129,7 +136,7 @@ class JT808Server extends EventEmitter {
     const seqNo = packet.readUInt16BE(6);
     const simNo = bcdToString(packet.subarray(8, 14));
     const channel = packet[14];
-    const { headerLen, bodyLen, dataType, subpackage, isVideo } = meta;
+    const { headerLen, bodyLen, dataType, subpackage, isVideo, isAudio } = meta;
 
     const payload = packet.subarray(headerLen, headerLen + bodyLen);
     const streamKey = `${simNo}_${channel}`;
@@ -146,6 +153,15 @@ class JT808Server extends EventEmitter {
       bodyLen,
       timestamp: Date.now()
     });
+
+    if (isAudio) {
+      this.emit('audio_frame', {
+        simNo,
+        channel,
+        pt,
+        data: payload
+      });
+    }
 
     if (isVideo) {
       if (subpackage === 0) {
@@ -384,7 +400,7 @@ class JT808Server extends EventEmitter {
     const tcpPort = options.tcpPort || 5023;
     const udpPort = options.udpPort || 0;
     const channel = options.channel !== undefined ? options.channel : 1;
-    const dataType = options.dataType !== undefined ? options.dataType : 0;
+    const dataType = options.dataType !== undefined ? options.dataType : 0; // 0: Audio/Video, 2: Two-way Talkback, 4: Broadcast
     const streamType = options.streamType !== undefined ? options.streamType : 0;
 
     const ipBuf = Buffer.from(serverIp, 'ascii');
@@ -414,15 +430,41 @@ class JT808Server extends EventEmitter {
     device.socket.write(packet);
     device.activeChannel = channel;
 
+    const typeDesc = dataType === 2 ? 'Two-way Talkback' : (dataType === 4 ? 'Broadcast Voice' : 'Audio & Video');
     this.emit('packet', {
       direction: 'OUT',
       msgId: '0x9101',
       simNo,
       seqNo,
-      desc: `Request Live Stream (IP: ${serverIp}:${tcpPort}, Ch: ${channel}, Stream: ${streamType === 0 ? 'Main' : 'Sub'})`
+      desc: `Request ${typeDesc} (IP: ${serverIp}:${tcpPort}, Ch: ${channel})`
     });
 
     return { seqNo, simNo, channel, serverIp, tcpPort };
+  }
+
+  // Send Downlink Audio Frame (Server Mic -> Dashcam Speaker)
+  sendAudioFrame(simNo, pcmBuffer, channel = 1) {
+    const device = this.devices.get(simNo);
+    if (!device || !device.socket || !device.online) {
+      return false;
+    }
+
+    try {
+      const alawData = encodePcmToAlaw(pcmBuffer);
+      const rtpPacket = buildJT1078AudioPacket({
+        simNo,
+        channel,
+        seqNo: this.getNextAudioSeq(),
+        alawData,
+        timestamp: Date.now()
+      });
+
+      device.socket.write(rtpPacket);
+      return true;
+    } catch (err) {
+      console.error('Error sending audio frame to dashcam:', err.message);
+      return false;
+    }
   }
 
   stopLiveVideo(simNo, channel = 0) {
@@ -453,7 +495,7 @@ class JT808Server extends EventEmitter {
       msgId: '0x9102',
       simNo,
       seqNo,
-      desc: `Stop Live Stream (Ch: ${channel === 0 ? 'ALL' : channel})`
+      desc: `Stop Stream / Audio (Ch: ${channel === 0 ? 'ALL' : channel})`
     });
 
     return { seqNo, simNo, channel };

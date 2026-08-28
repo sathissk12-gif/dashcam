@@ -58,6 +58,14 @@
           </button>
         </div>
 
+        <!-- Two-Way Audio Talkback Bar -->
+        <div class="talkback-bar" style="margin: 8px 0; display: flex; gap: 8px; align-items: center;">
+          <button id="talkbackBtn" class="btn" style="flex: 1; background: #059669; color: white; padding: 10px 14px; font-weight: bold; border-radius: 6px;">
+            <i class="fa-solid fa-microphone"></i> Hold to Talk / Start Two-Way Audio
+          </button>
+          <span id="talkbackStatus" class="badge" style="background: #1e293b; color: #94a3b8; padding: 8px 12px;">Mic Idle</span>
+        </div>
+
         <!-- Video Controls Bar -->
         <div class="controls-panel">
           <div class="control-inputs">
@@ -164,7 +172,7 @@
         </div>
         <div id="logsContainer" class="terminal-logs">
           <div class="log-entry system-log">
-            <span class="timestamp">[SYSTEM]</span> Unified JT808/JT1078 Server Online. Ready for Front & Cabin Camera feeds.
+            <span class="timestamp">[SYSTEM]</span> Unified JT808/JT1078 Server Online. Two-Way Audio Talkback & Live Video Ready.
           </div>
         </div>
       </section>
