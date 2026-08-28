@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Dashcam Mobile Player</title>
+  <title>Dashcam Live Player</title>
   <style>
     * {
       margin: 0;
@@ -37,9 +37,9 @@
     }
     .hud-overlay {
       position: absolute;
-      top: 10px;
-      left: 10px;
-      right: 10px;
+      top: 8px;
+      left: 8px;
+      right: 8px;
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -49,7 +49,7 @@
     .badge {
       display: inline-flex;
       align-items: center;
-      padding: 4px 8px;
+      padding: 3px 8px;
       border-radius: 4px;
       font-size: 11px;
       font-weight: 700;
@@ -73,60 +73,44 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.7; }
     }
-    #status-overlay {
+    #videoOverlay {
       position: absolute;
       inset: 0;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      background: rgba(15, 23, 42, 0.92);
+      background: rgba(15, 23, 42, 0.9);
       color: #fff;
       z-index: 20;
       text-align: center;
-      padding: 20px;
+      padding: 16px;
       transition: opacity 0.3s ease;
     }
+    #videoOverlay.hidden {
+      display: none !important;
+    }
     .spinner {
-      width: 36px;
-      height: 36px;
+      width: 32px;
+      height: 32px;
       border: 3px solid rgba(255, 255, 255, 0.2);
-      border-top-color: #f97316;
+      border-top-color: #00f2fe;
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
-      margin-bottom: 12px;
+      margin-bottom: 10px;
     }
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
-    .status-text {
-      font-size: 14px;
-      color: #e2e8f0;
-      font-weight: 600;
-      max-width: 90%;
-    }
-    .sub-text {
-      font-size: 12px;
-      color: #94a3b8;
-      margin-top: 6px;
-      max-width: 90%;
-      line-height: 1.4;
-    }
-    .btn-test {
-      margin-top: 16px;
-      padding: 8px 16px;
-      background: #ea580c;
-      color: #fff;
-      border: none;
-      border-radius: 8px;
-      font-weight: 600;
+    .overlay-title {
       font-size: 13px;
-      cursor: pointer;
-      pointer-events: auto;
-      box-shadow: 0 4px 12px rgba(234, 88, 12, 0.35);
+      font-weight: 600;
+      color: #e2e8f0;
     }
-    .btn-test:active {
-      transform: scale(0.96);
+    .overlay-sub {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 4px;
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/jmuxer@2.0.5/dist/jmuxer.min.js"></script>
@@ -136,17 +120,15 @@
     <video id="player" autoplay muted playsinline></video>
     
     <div class="hud-overlay">
-      <div id="live-badge" class="badge badge-live">LIVE</div>
-      <div id="cam-badge" class="badge">CH 1 • FRONT</div>
+      <div id="liveBadge" class="badge badge-live">LIVE</div>
+      <div id="channelBadge" class="badge">CH 1 • FRONT</div>
+      <div id="fpsBadge" class="badge" style="background: rgba(0,242,254,0.25); color: #00f2fe;">0 FPS</div>
     </div>
 
-    <div id="status-overlay">
-      <div id="spinner" class="spinner"></div>
-      <div id="status-text" class="status-text">Connecting to Camera VPS...</div>
-      <div id="sub-text" class="sub-text">Waiting for H.264 video feed</div>
-      <button id="btn-test-stream" class="btn-test" style="display:none;" onclick="startTestFeed()">
-        ▶ Start Test Video Feed
-      </button>
+    <div id="videoOverlay">
+      <div class="spinner"></div>
+      <div id="overlayText" class="overlay-title">Connecting to Camera VPS...</div>
+      <div id="overlaySub" class="overlay-sub">Negotiating JT1078 live video stream</div>
     </div>
   </div>
 
@@ -154,122 +136,162 @@
     const urlParams = new URLSearchParams(window.location.search);
     const simNo = urlParams.get('sim') || '015770054447';
     const channel = parseInt(urlParams.get('channel') || '1', 10);
-    const autoTest = urlParams.get('test') === 'true';
-    
-    const camBadge = document.getElementById('cam-badge');
-    camBadge.innerText = channel === 1 ? 'CH 1 • FRONT' : 'CH 2 • CABIN';
+    const streamType = parseInt(urlParams.get('streamType') || '1', 10); // 1 = Sub Stream (Fast / Low Latency)
 
-    const statusOverlay = document.getElementById('status-overlay');
-    const statusText = document.getElementById('status-text');
-    const subText = document.getElementById('sub-text');
-    const spinner = document.getElementById('spinner');
-    const btnTest = document.getElementById('btn-test-stream');
-    const videoElem = document.getElementById('player');
+    const playerEl = document.getElementById('player');
+    const videoOverlay = document.getElementById('videoOverlay');
+    const overlayText = document.getElementById('overlayText');
+    const overlaySub = document.getElementById('overlaySub');
+    const channelBadge = document.getElementById('channelBadge');
+    const fpsBadge = document.getElementById('fpsBadge');
 
-    let jmuxer = null;
+    channelBadge.innerText = channel === 1 ? 'CH 1 • FRONT' : 'CH 2 • CABIN';
+
     let ws = null;
+    let jmuxer = null;
     let frameCount = 0;
+    let lastFpsTime = Date.now();
+    let hasSeenKeyframe = false;
 
-    function initMuxer() {
+    function initJMuxer() {
+      hasSeenKeyframe = false;
+      if (jmuxer) {
+        try { jmuxer.destroy(); } catch (e) {}
+        jmuxer = null;
+      }
+
+      playerEl.muted = true;
+      playerEl.setAttribute('playsinline', '');
+      playerEl.setAttribute('autoplay', '');
+
       try {
         jmuxer = new JMuxer({
           node: 'player',
           mode: 'video',
           flushingTime: 0,
+          clearBuffer: true,
           fps: 25,
           debug: false,
           onError: function(data) {
-            console.warn('JMuxer Warning:', data);
+            console.warn('JMuxer event:', data);
           }
         });
       } catch (e) {
         console.error('JMuxer init failed:', e);
       }
+
+      playerEl.addEventListener('timeupdate', () => {
+        if (playerEl.buffered && playerEl.buffered.length > 0) {
+          const bufferEnd = playerEl.buffered.end(playerEl.buffered.length - 1);
+          const lag = bufferEnd - playerEl.currentTime;
+          if (lag > 0.35) {
+            playerEl.currentTime = bufferEnd - 0.05;
+          }
+        }
+      });
+
+      playerEl.play().catch(() => {});
     }
 
-    function startTestFeed() {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        statusText.innerText = 'Starting Test Video Stream...';
-        btnTest.style.display = 'none';
-        spinner.style.display = 'block';
-        ws.send(JSON.stringify({
-          action: 'start_test_stream',
-          simNo: simNo,
-          channel: channel
-        }));
+    function isH264Keyframe(uint8) {
+      for (let i = 0; i < Math.min(uint8.length - 4, 64); i++) {
+        if (uint8[i] === 0x00 && uint8[i + 1] === 0x00 && (uint8[i + 2] === 0x01 || (uint8[i + 2] === 0x00 && uint8[i + 3] === 0x01))) {
+          const nalByte = uint8[i + 2] === 0x01 ? uint8[i + 3] : uint8[i + 4];
+          const nalType = nalByte & 0x1f;
+          if (nalType === 7 || nalType === 8 || nalType === 5) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function handleVideoFrame(arrayBuffer) {
+      frameCount++;
+      const uint8 = new Uint8Array(arrayBuffer);
+
+      if (!hasSeenKeyframe) {
+        if (isH264Keyframe(uint8)) {
+          hasSeenKeyframe = true;
+        }
+      }
+
+      if (jmuxer) {
+        jmuxer.feed({
+          video: uint8
+        });
+      }
+
+      if (videoOverlay && !videoOverlay.classList.contains('hidden')) {
+        videoOverlay.classList.add('hidden');
+      }
+
+      if (playerEl.paused) {
+        playerEl.play().catch(() => {});
+      }
+
+      const now = Date.now();
+      if (now - lastFpsTime >= 1000) {
+        const fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+        fpsBadge.textContent = `${fps} FPS`;
+        frameCount = 0;
+        lastFpsTime = now;
       }
     }
 
-    function connectWs() {
+    function connectWebSocket() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-      statusText.innerText = `Connecting (${simNo})...`;
+      overlayText.textContent = `Connecting to VPS...`;
       ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
-        statusText.innerText = 'Requesting Live Stream (0x9101)...';
-        subText.innerText = `Channel ${channel} • SIM ${simNo}`;
+        overlayText.textContent = `Requesting Channel ${channel}...`;
+        overlaySub.textContent = `SIM: ${simNo} (Fast Sub Stream)`;
         
         ws.send(JSON.stringify({
           action: 'start_stream',
           simNo: simNo,
           channel: channel,
-          streamType: 0
+          streamType: streamType,
+          mediaPort: 5023
         }));
-
-        if (autoTest) {
-          startTestFeed();
-        }
       };
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
-          frameCount++;
-          if (frameCount >= 2) {
-            statusOverlay.style.opacity = '0';
-            setTimeout(() => { statusOverlay.style.display = 'none'; }, 300);
-            videoElem.play().catch(() => {});
-          }
-          if (jmuxer) {
-            jmuxer.feed({
-              video: new Uint8Array(event.data)
-            });
-          }
-        } else {
-          try {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'stream_started') {
-              statusText.innerText = 'Handshake OK. Decoding Video...';
-            } else if (msg.type === 'error') {
-              spinner.style.display = 'none';
-              statusText.innerText = `Camera 4G Device Offline`;
-              subText.innerText = `Dashcam (SIM: ${simNo}) is not currently transmitting on Port 5023. Turn on vehicle ACC or run test feed.`;
-              btnTest.style.display = 'inline-block';
-            }
-          } catch (e) {}
+          handleVideoFrame(event.data);
+          return;
         }
+
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'stream_started') {
+            overlayText.textContent = 'Stream Negotiated. Decoding Video...';
+          }
+        } catch (e) {}
       };
 
       ws.onclose = () => {
-        statusOverlay.style.display = 'flex';
-        statusOverlay.style.opacity = '1';
-        statusText.innerText = 'Reconnecting to VPS...';
-        setTimeout(connectWs, 2500);
+        videoOverlay.classList.remove('hidden');
+        overlayText.textContent = 'Reconnecting...';
+        overlaySub.textContent = 'Connection lost, retrying in 2s';
+        setTimeout(connectWebSocket, 2000);
       };
 
       ws.onerror = () => {
-        statusText.innerText = 'Connection Error. Retrying...';
+        overlayText.textContent = 'Connection error, retrying...';
       };
     }
 
     document.addEventListener('DOMContentLoaded', () => {
-      initMuxer();
-      connectWs();
+      initJMuxer();
+      connectWebSocket();
 
       document.body.addEventListener('click', () => {
-        videoElem.play().catch(() => {});
+        playerEl.play().catch(() => {});
       }, { once: true });
     });
   </script>

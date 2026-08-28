@@ -279,7 +279,7 @@ app.delete('/api/vehicles/:id', (req, res) => {
 // 3. Live Stream Signaling APIs
 app.post('/api/vehicles/:simNo/stream/start', async (req, res) => {
   const { simNo } = req.params;
-  const { channel = 1, dataType = 0, streamType = 0 } = req.body;
+  const { channel = 1, dataType = 0, streamType = 1 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
 
   try {
@@ -436,7 +436,16 @@ function setupJT808Handlers(serverInstance, portName) {
   });
 
   serverInstance.on('video_frame', (frame) => {
-    broadcastBinary(frame.data);
+    // Precise Channel Routing to prevent multi-view collision
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        const matchesSim = !client.subscribedSim || client.subscribedSim === frame.simNo;
+        const matchesChannel = !client.subscribedChannel || client.subscribedChannel === frame.channel;
+        if (matchesSim && matchesChannel) {
+          client.send(frame.data);
+        }
+      }
+    });
   });
 
   serverInstance.on('audio_frame', (audioFrame) => {
@@ -514,7 +523,6 @@ function broadcastDeviceList() {
 }
 
 wss.on('connection', (ws) => {
-  console.log('[WebSocket] Client connected.');
   broadcastDeviceList();
   ws.send(JSON.stringify({
     type: 'server_info',
@@ -538,10 +546,13 @@ wss.on('connection', (ws) => {
 });
 
 async function handleWsClientMessage(clientWs, data) {
-  const { action, simNo, channel = 1, streamType = 0, customIp, mediaPort, audioData } = data;
+  const { action, simNo, channel = 1, streamType = 1, customIp, mediaPort, audioData } = data;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
   const videoMediaIp = customIp || publicIp || localServerIp;
   const videoMediaPort = parseInt(mediaPort || DEFAULT_MEDIA_PORT, 10);
+
+  if (simNo) clientWs.subscribedSim = simNo;
+  if (channel) clientWs.subscribedChannel = parseInt(channel, 10);
 
   switch (action) {
     case 'get_devices':
@@ -549,7 +560,7 @@ async function handleWsClientMessage(clientWs, data) {
       break;
 
     case 'start_test_stream': {
-      console.log(`[Test Stream] Starting 25 FPS live H.264 stream for ${simNo}...`);
+      console.log(`[Test Stream] Starting 25 FPS live H.264 stream for ${simNo} Ch:${channel}...`);
       let frameIdx = 0;
       if (clientWs._testInterval) clearInterval(clientWs._testInterval);
       clientWs._testInterval = setInterval(() => {
@@ -565,7 +576,7 @@ async function handleWsClientMessage(clientWs, data) {
 
     case 'start_stream': {
       try {
-        console.log(`[Command] Switching/Starting Live Video on ${simNo} (Target: ${videoMediaIp}:${videoMediaPort}, Channel:${channel})...`);
+        console.log(`[Command] Requesting Live Video on ${simNo} (Target: ${videoMediaIp}:${videoMediaPort}, Channel:${channel}, Type:${streamType})...`);
         try { targetServer.stopLiveVideo(simNo, 0); } catch (e) {}
         await new Promise(r => setTimeout(r, 200));
         try { targetServer.disableSleepMode(simNo); } catch (e) {}
@@ -576,7 +587,7 @@ async function handleWsClientMessage(clientWs, data) {
           udpPort: 0,
           channel: parseInt(channel, 10),
           dataType: 0,
-          streamType: parseInt(streamType, 10)
+          streamType: parseInt(streamType, 10) // 1 = Sub stream (fast / low latency)
         });
 
         clientWs.send(JSON.stringify({
