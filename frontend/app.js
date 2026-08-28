@@ -1,6 +1,6 @@
 /**
  * Dashcam Command Center Frontend Application
- * Handles WebSocket communication, Leaflet GPS live tracking, and JMuxer H.264 video rendering.
+ * Ultra-Low-Latency H.264 Live Stream Player & GPS Live Tracking
  */
 
 // State
@@ -16,6 +16,7 @@ let isSimRunning = false;
 let frameCount = 0;
 let currentChannel = 1;
 let lastFpsTime = Date.now();
+let hasSeenKeyframe = false;
 
 // DOM Elements
 const playerEl = document.getElementById('player');
@@ -71,21 +72,38 @@ function initMap() {
 }
 
 function initJMuxer() {
+  hasSeenKeyframe = false;
+  
   if (jmuxer) {
     try { jmuxer.destroy(); } catch (e) {}
+    jmuxer = null;
   }
 
   playerEl.muted = true;
+  playerEl.setAttribute('playsinline', '');
+  playerEl.setAttribute('autoplay', '');
 
   jmuxer = new JMuxer({
     node: 'player',
     mode: 'video',
-    flushingTime: 50,
-    clearBuffer: true,
+    flushingTime: 0,          // 0ms = Instant flush for real-time live streaming (No lag/freeze)
+    clearBuffer: true,        // Prevent buffer bloat
     fps: 25,
     debug: false,
     onError: function(data) {
       console.warn('JMuxer event:', data);
+    }
+  });
+
+  // Low-latency buffer catch-up handler
+  playerEl.addEventListener('timeupdate', () => {
+    if (playerEl.buffered && playerEl.buffered.length > 0) {
+      const bufferEnd = playerEl.buffered.end(playerEl.buffered.length - 1);
+      const lag = bufferEnd - playerEl.currentTime;
+      // If video playhead is lagging more than 0.3s behind live edge, jump to live edge
+      if (lag > 0.35) {
+        playerEl.currentTime = bufferEnd - 0.05;
+      }
     }
   });
 
@@ -124,14 +142,35 @@ function connectWebSocket() {
   };
 }
 
+function isH264Keyframe(uint8) {
+  // Check for NAL types 7 (SPS), 8 (PPS), or 5 (IDR Keyframe)
+  for (let i = 0; i < Math.min(uint8.length - 4, 64); i++) {
+    if (uint8[i] === 0x00 && uint8[i + 1] === 0x00 && (uint8[i + 2] === 0x01 || (uint8[i + 2] === 0x00 && uint8[i + 3] === 0x01))) {
+      const nalByte = uint8[i + 2] === 0x01 ? uint8[i + 3] : uint8[i + 4];
+      const nalType = nalByte & 0x1f;
+      if (nalType === 7 || nalType === 8 || nalType === 5) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function handleVideoFrame(arrayBuffer) {
   frameCount++;
+  const uint8 = new Uint8Array(arrayBuffer);
+
+  // Check if frame is Keyframe
+  if (!hasSeenKeyframe) {
+    if (isH264Keyframe(uint8)) {
+      hasSeenKeyframe = true;
+      console.log('✅ Keyframe received! Starting smooth playback.');
+    }
+  }
 
   if (!isStreaming) {
     setStreamingState(true);
   }
-
-  const uint8 = new Uint8Array(arrayBuffer);
 
   if (jmuxer) {
     jmuxer.feed({
@@ -141,6 +180,10 @@ function handleVideoFrame(arrayBuffer) {
 
   if (videoOverlay && !videoOverlay.classList.contains('hidden')) {
     videoOverlay.classList.add('hidden');
+  }
+
+  if (playerEl.paused) {
+    playerEl.play().catch(() => {});
   }
 
   const now = Date.now();
@@ -348,7 +391,7 @@ function requestStream(channel) {
       mediaPort: 5023
     }));
   }
-  overlayText.textContent = `Switching to Camera Channel ${channel}...`;
+  overlayText.textContent = `Streaming Camera Channel ${channel} (Live)...`;
 }
 
 startLiveBtn.addEventListener('click', () => {

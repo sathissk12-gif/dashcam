@@ -9,6 +9,7 @@ class JT808Server extends EventEmitter {
     this.devices = new Map();
     this.serverSeq = 0;
     this.frameAssemblers = new Map();
+    this.lastSpsPpsMap = new Map();
   }
 
   getNextSeq() {
@@ -116,6 +117,13 @@ class JT808Server extends EventEmitter {
     });
   }
 
+  ensureAnnexBStartCode(buf) {
+    if (buf.length >= 4 && buf[0] === 0x00 && buf[1] === 0x00 && ((buf[2] === 0x00 && buf[3] === 0x01) || buf[2] === 0x01)) {
+      return buf;
+    }
+    return Buffer.concat([Buffer.from([0x00, 0x00, 0x00, 0x01]), buf]);
+  }
+
   handleJt1078Packet(packet, meta) {
     const pt = packet[5] & 0x7f;
     const seqNo = packet.readUInt16BE(6);
@@ -141,12 +149,16 @@ class JT808Server extends EventEmitter {
 
     if (isVideo) {
       if (subpackage === 0) {
+        const fullPayload = this.ensureAnnexBStartCode(payload);
+        if (dataType === 0) {
+          this.lastSpsPpsMap.set(streamKey, fullPayload);
+        }
         this.emit('video_frame', {
           simNo,
           channel,
           pt,
           isKeyframe: dataType === 0,
-          data: payload
+          data: fullPayload
         });
       } else if (subpackage === 1) {
         this.frameAssemblers.set(streamKey, [payload]);
@@ -158,8 +170,12 @@ class JT808Server extends EventEmitter {
         if (this.frameAssemblers.has(streamKey)) {
           const parts = this.frameAssemblers.get(streamKey);
           parts.push(payload);
-          const fullFrame = Buffer.concat(parts);
+          const fullFrame = this.ensureAnnexBStartCode(Buffer.concat(parts));
           this.frameAssemblers.delete(streamKey);
+
+          if (dataType === 0) {
+            this.lastSpsPpsMap.set(streamKey, fullFrame);
+          }
 
           this.emit('video_frame', {
             simNo,
@@ -416,9 +432,9 @@ class JT808Server extends EventEmitter {
     }
 
     const body = Buffer.alloc(4);
-    body.writeUInt8(channel, 0); // 0 = all channels, or specific channel
-    body.writeUInt8(0, 1);       // 0 = close audio and video
-    body.writeUInt8(0, 2);       // 0 = audio & video
+    body.writeUInt8(channel, 0);
+    body.writeUInt8(0, 1);
+    body.writeUInt8(0, 2);
     body.writeUInt8(0, 3);
 
     const seqNo = this.getNextSeq();
