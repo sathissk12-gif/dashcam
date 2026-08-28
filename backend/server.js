@@ -20,8 +20,7 @@ const JT1078Server = require('./src/jt1078/server');
 const DashcamSimulator = require('./src/simulator/dashcam_sim');
 
 const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
-const JT1078_PORT = parseInt(process.env.JT1078_PORT || '9902', 10);
-const JT1078_ALT_PORT = 1078;
+const JT1078_PORT = parseInt(process.env.JT1078_PORT || '8081', 10); // 8081 is open on VPS
 let publicIp = process.env.PUBLIC_IP || null;
 
 function getLocalIp() {
@@ -64,8 +63,8 @@ app.get('/api/status', (req, res) => {
     status: 'online',
     serverIp: publicIp || localServerIp,
     localIp: localServerIp,
-    listeningPorts: activePorts,
-    jt1078Port: JT1078_PORT,
+    jt808Ports: activeJt808Ports,
+    jt1078Ports: activeJt1078Ports,
     devicesCount: jt808Servers.reduce((acc, s) => acc + s.devices.size, 0)
   });
 });
@@ -90,13 +89,15 @@ function broadcastBinary(binaryData) {
   });
 }
 
-// Multi-port listeners: Supports 5023 (Camera current target), 9901, 7788, 9092
-const candidatePorts = [5023, 9901, 7788, 9092];
-const jt808Servers = candidatePorts.map(p => new JT808Server({ port: p }));
-const activePorts = [];
+// Multi-port listeners for Signaling: 5023, 9901, 7788, 9092
+const candidateJt808Ports = [5023, 9901, 7788, 9092];
+const jt808Servers = candidateJt808Ports.map(p => new JT808Server({ port: p }));
+const activeJt808Ports = [];
 
-const jt1078Server = new JT1078Server({ port: JT1078_PORT });
-const jt1078AltServer = new JT1078Server({ port: JT1078_ALT_PORT });
+// Multi-port listeners for Video Media: 8081 (Open), 9902, 1078
+const candidateJt1078Ports = [8081, 9902, 1078];
+const jt1078Servers = candidateJt1078Ports.map(p => new JT1078Server({ port: p }));
+const activeJt1078Ports = [];
 
 let activeSimulator = null;
 
@@ -131,6 +132,17 @@ function setupJT808Handlers(serverInstance, portName) {
     });
   });
 
+  serverInstance.on('device_ack', (ackData) => {
+    console.log(`[JT808:${portName}] Device ACK:`, ackData);
+    broadcastJson({
+      type: 'packet_log',
+      protocol: `JT808 (${portName})`,
+      direction: 'IN',
+      msgId: '0x0001',
+      desc: `Device ACK for ${ackData.replyMsgId} Result: ${ackData.result}`
+    });
+  });
+
   serverInstance.on('device_offline', ({ simNo }) => {
     console.log(`[JT808:${portName}] Device Offline: ${simNo}`);
     broadcastDeviceList();
@@ -138,14 +150,14 @@ function setupJT808Handlers(serverInstance, portName) {
 }
 
 jt808Servers.forEach((serverInstance, idx) => {
-  setupJT808Handlers(serverInstance, candidatePorts[idx]);
+  setupJT808Handlers(serverInstance, candidateJt808Ports[idx]);
 });
 
-function setupJT1078Handlers(mediaServer) {
+function setupJT1078Handlers(mediaServer, portName) {
   mediaServer.on('packet', (data) => {
     broadcastJson({
       type: 'packet_log',
-      protocol: 'JT1078',
+      protocol: `JT1078 (${portName})`,
       direction: 'MEDIA',
       msgId: `[${data.dataType}]`,
       desc: `Ch:${data.channel} Seq:${data.seqNo} Sub:${data.subpackage} Len:${data.bodyLen}B`
@@ -157,8 +169,9 @@ function setupJT1078Handlers(mediaServer) {
   });
 }
 
-setupJT1078Handlers(jt1078Server);
-setupJT1078Handlers(jt1078AltServer);
+jt1078Servers.forEach((mediaServer, idx) => {
+  setupJT1078Handlers(mediaServer, candidateJt1078Ports[idx]);
+});
 
 function broadcastDeviceList() {
   const devices = [];
@@ -184,7 +197,7 @@ wss.on('connection', (ws) => {
   ws.send(JSON.stringify({
     type: 'server_info',
     serverIp: publicIp || localServerIp,
-    listeningPorts: activePorts,
+    jt808Ports: activeJt808Ports,
     jt1078Port: JT1078_PORT
   }));
   ws.send(JSON.stringify({ type: 'sim_status', running: !!activeSimulator }));
@@ -216,7 +229,7 @@ function handleWsClientMessage(clientWs, data) {
           serverIp: videoMediaIp,
           tcpPort: JT1078_PORT,
           channel: parseInt(channel, 10),
-          dataType: 0,
+          dataType: 0, // Audio & Video
           streamType: parseInt(streamType, 10)
         });
         clientWs.send(JSON.stringify({
@@ -273,24 +286,22 @@ async function startAll() {
   for (const s of jt808Servers) {
     try {
       await s.start();
-      activePorts.push(s.port);
+      activeJt808Ports.push(s.port);
       console.log(`📡 JT808 TCP Server listening on port ${s.port}`);
     } catch (e) {
       console.warn(`Could not bind JT808 on port ${s.port}: ${e.message}`);
     }
   }
 
-  try {
-    await jt1078Server.start();
-    console.log(`🎥 JT1078 Media TCP Server listening on port ${JT1078_PORT}`);
-  } catch (e) {
-    console.warn(`Could not bind JT1078 on port ${JT1078_PORT}: ${e.message}`);
+  for (const s of jt1078Servers) {
+    try {
+      await s.start();
+      activeJt1078Ports.push(s.port);
+      console.log(`🎥 JT1078 Media TCP Server listening on port ${s.port}`);
+    } catch (e) {
+      console.warn(`Could not bind JT1078 on port ${s.port}: ${e.message}`);
+    }
   }
-
-  try {
-    await jt1078AltServer.start();
-    console.log(`🎥 JT1078 Alt Media TCP Server listening on port ${JT1078_ALT_PORT}`);
-  } catch (e) {}
 
   httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
     console.log(`🚀 Web Dashboard available at http://0.0.0.0:${HTTP_PORT}`);
