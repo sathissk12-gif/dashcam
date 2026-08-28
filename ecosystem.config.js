@@ -10,9 +10,10 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: 9090,
-        JT808_PORT: 9901,
-        JT808_ALT_PORT: 9092,
-        JT1078_PORT: 9902
+        JT808_PORT: 5023,
+        JT808_ALT1: 9901,
+        JT808_ALT2: 7788,
+        JT1078_PORT: 8081
       }
     }
   ]
