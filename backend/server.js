@@ -20,7 +20,7 @@ const JT1078Server = require('./src/jt1078/server');
 const DashcamSimulator = require('./src/simulator/dashcam_sim');
 
 const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
-const DEFAULT_MEDIA_PORT = 8081;
+const DEFAULT_MEDIA_PORT = 5023;
 let publicIp = process.env.PUBLIC_IP || null;
 
 function getLocalIp() {
@@ -64,7 +64,6 @@ app.get('/api/status', (req, res) => {
     serverIp: publicIp || localServerIp,
     localIp: localServerIp,
     jt808Ports: activeJt808Ports,
-    jt1078Ports: activeJt1078Ports,
     devicesCount: jt808Servers.reduce((acc, s) => acc + s.devices.size, 0)
   });
 });
@@ -89,15 +88,10 @@ function broadcastBinary(binaryData) {
   });
 }
 
-// Multi-port listeners for Signaling: 5023, 9901, 7788, 9092
-const candidateJt808Ports = [5023, 9901, 7788, 9092];
+// Multi-port listeners for Unified Signaling & Media: 5023, 8081, 9901, 7788, 9092
+const candidateJt808Ports = [5023, 8081, 9901, 7788, 9092];
 const jt808Servers = candidateJt808Ports.map(p => new JT808Server({ port: p }));
 const activeJt808Ports = [];
-
-// Multi-port listeners for Video Media: 8081 (Open), 9902, 1078
-const candidateJt1078Ports = [8081, 9902, 1078];
-const jt1078Servers = candidateJt1078Ports.map(p => new JT1078Server({ port: p }));
-const activeJt1078Ports = [];
 
 let activeSimulator = null;
 
@@ -121,7 +115,6 @@ function setupJT808Handlers(serverInstance, portName) {
   });
 
   serverInstance.on('video_frame', (frame) => {
-    console.log(`[Video:${portName}] Live Video Frame! Size: ${frame.data.length}B, Keyframe: ${frame.isKeyframe}`);
     broadcastBinary(frame.data);
   });
 
@@ -168,27 +161,6 @@ jt808Servers.forEach((serverInstance, idx) => {
   setupJT808Handlers(serverInstance, candidateJt808Ports[idx]);
 });
 
-function setupJT1078Handlers(mediaServer, portName) {
-  mediaServer.on('packet', (data) => {
-    broadcastJson({
-      type: 'packet_log',
-      protocol: `JT1078 (${portName})`,
-      direction: 'MEDIA',
-      msgId: `[${data.dataType}]`,
-      desc: `Ch:${data.channel} Seq:${data.seqNo} Sub:${data.subpackage} Len:${data.bodyLen}B`
-    });
-  });
-
-  mediaServer.on('video_frame', (frame) => {
-    console.log(`[JT1078:${portName}] Video frame received! Length: ${frame.data.length} bytes`);
-    broadcastBinary(frame.data);
-  });
-}
-
-jt1078Servers.forEach((mediaServer, idx) => {
-  setupJT1078Handlers(mediaServer, candidateJt1078Ports[idx]);
-});
-
 function broadcastDeviceList() {
   const devices = [];
   jt808Servers.forEach((server) => {
@@ -198,6 +170,7 @@ function broadcastDeviceList() {
           simNo,
           online: dev.online,
           authenticated: dev.authenticated,
+          activeChannel: dev.activeChannel,
           lastSeen: dev.lastSeen,
           location: dev.location
         });
@@ -214,7 +187,6 @@ wss.on('connection', (ws) => {
     type: 'server_info',
     serverIp: publicIp || localServerIp,
     jt808Ports: activeJt808Ports,
-    jt1078Ports: activeJt1078Ports,
     defaultMediaPort: DEFAULT_MEDIA_PORT
   }));
   ws.send(JSON.stringify({ type: 'sim_status', running: !!activeSimulator }));
@@ -229,7 +201,7 @@ wss.on('connection', (ws) => {
   });
 });
 
-function handleWsClientMessage(clientWs, data) {
+async function handleWsClientMessage(clientWs, data) {
   const { action, simNo, channel = 1, streamType = 0, customIp, mediaPort } = data;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
   const videoMediaIp = customIp || publicIp || localServerIp;
@@ -242,16 +214,22 @@ function handleWsClientMessage(clientWs, data) {
 
     case 'start_stream': {
       try {
-        console.log(`[Command] Waking up and requesting Live Video from ${simNo} (Target Media: ${videoMediaIp}:${videoMediaPort}, Ch:${channel})...`);
+        console.log(`[Command] Switching/Starting Live Video on ${simNo} (Target: ${videoMediaIp}:${videoMediaPort}, Channel:${channel})...`);
         
-        // 1. Force Wakeup / Disable Sleep Mode (0x8103)
+        // 1. Send stop command (0x9102) to reset existing channel stream
+        try {
+          targetServer.stopLiveVideo(simNo, 0);
+        } catch (e) {}
+
+        // 2. Wait 200ms for hardware sensor switch
+        await new Promise(r => setTimeout(r, 200));
+
+        // 3. Force Wakeup / Disable Sleep Mode (0x8103)
         try {
           targetServer.disableSleepMode(simNo);
-        } catch (e) {
-          console.warn('Wakeup command warning:', e.message);
-        }
+        } catch (e) {}
 
-        // 2. Request Live Video Stream (0x9101)
+        // 4. Request Live Video Stream on requested Channel (0x9101)
         const reqResult = targetServer.requestLiveVideo(simNo, {
           serverIp: videoMediaIp,
           tcpPort: videoMediaPort,
@@ -263,6 +241,7 @@ function handleWsClientMessage(clientWs, data) {
 
         clientWs.send(JSON.stringify({
           type: 'stream_started',
+          channel: parseInt(channel, 10),
           ...reqResult
         }));
       } catch (err) {
@@ -277,7 +256,7 @@ function handleWsClientMessage(clientWs, data) {
     case 'stop_stream': {
       try {
         console.log(`[Command] Stopping Live Video for ${simNo}...`);
-        const stopResult = targetServer.stopLiveVideo(simNo, parseInt(channel, 10));
+        const stopResult = targetServer.stopLiveVideo(simNo, parseInt(channel || 0, 10));
         clientWs.send(JSON.stringify({
           type: 'stream_stopped',
           ...stopResult
@@ -316,19 +295,9 @@ async function startAll() {
     try {
       await s.start();
       activeJt808Ports.push(s.port);
-      console.log(`📡 JT808 TCP Server listening on port ${s.port}`);
+      console.log(`📡 Unified JT808/JT1078 Server listening on port ${s.port}`);
     } catch (e) {
-      console.warn(`Could not bind JT808 on port ${s.port}: ${e.message}`);
-    }
-  }
-
-  for (const s of jt1078Servers) {
-    try {
-      await s.start();
-      activeJt1078Ports.push(s.port);
-      console.log(`🎥 JT1078 Media TCP Server listening on port ${s.port}`);
-    } catch (e) {
-      console.warn(`Could not bind JT1078 on port ${s.port}: ${e.message}`);
+      console.warn(`Could not bind port ${s.port}: ${e.message}`);
     }
   }
 

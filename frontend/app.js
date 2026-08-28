@@ -14,7 +14,7 @@ let activeDevice = null;
 let isStreaming = false;
 let isSimRunning = false;
 let frameCount = 0;
-let totalFramesReceived = 0;
+let currentChannel = 1;
 let lastFpsTime = Date.now();
 
 // DOM Elements
@@ -23,19 +23,20 @@ const videoOverlay = document.getElementById('videoOverlay');
 const overlayText = document.getElementById('overlayText');
 const liveBadge = document.getElementById('liveBadge');
 const fpsBadge = document.getElementById('fpsBadge');
+const channelBadge = document.getElementById('channelBadge');
 const gpsStatusBadge = document.getElementById('gpsStatusBadge');
 const deviceSelect = document.getElementById('deviceSelect');
 const channelSelect = document.getElementById('channelSelect');
 const streamTypeSelect = document.getElementById('streamTypeSelect');
 const startLiveBtn = document.getElementById('startLiveBtn');
 const stopLiveBtn = document.getElementById('stopLiveBtn');
+const btnFrontCam = document.getElementById('btnFrontCam');
+const btnCabinCam = document.getElementById('btnCabinCam');
 const simControlBtn = document.getElementById('simControlBtn');
 const simBtnText = document.getElementById('simBtnText');
 const logsContainer = document.getElementById('logsContainer');
 const clearLogsBtn = document.getElementById('clearLogsBtn');
-
 const jt808PortDisplay = document.getElementById('jt808PortDisplay');
-const jt1078PortDisplay = document.getElementById('jt1078PortDisplay');
 
 // Telemetry DOM
 const speedVal = document.getElementById('speedVal');
@@ -124,7 +125,6 @@ function connectWebSocket() {
 }
 
 function handleVideoFrame(arrayBuffer) {
-  totalFramesReceived++;
   frameCount++;
 
   if (!isStreaming) {
@@ -156,7 +156,6 @@ function handleJsonMessage(msg) {
   switch (msg.type) {
     case 'server_info':
       if (jt808PortDisplay) jt808PortDisplay.textContent = '5023';
-      if (jt1078PortDisplay) jt1078PortDisplay.textContent = '5023';
       break;
 
     case 'device_list':
@@ -179,7 +178,8 @@ function handleJsonMessage(msg) {
 
     case 'stream_started':
       setStreamingState(true);
-      addLog(`[JT1078] Live video stream request sent (Seq: ${msg.seqNo})`, 'log-out');
+      if (msg.channel) updateChannelUI(msg.channel);
+      addLog(`[JT1078] Live video stream request sent (Ch: ${msg.channel || currentChannel})`, 'log-out');
       break;
 
     case 'stream_stopped':
@@ -266,6 +266,34 @@ function getCardinalDirection(deg) {
   return directions[Math.round(deg / 45) % 8];
 }
 
+function updateChannelUI(ch) {
+  currentChannel = ch;
+  channelSelect.value = ch;
+  if (ch === 1 || ch === 64) {
+    channelBadge.className = 'badge badge-info';
+    channelBadge.innerHTML = `<i class="fa-solid fa-road"></i> FRONT (CH ${ch})`;
+    if (btnFrontCam) {
+      btnFrontCam.style.background = '#0284c7';
+      btnFrontCam.style.color = '#fff';
+    }
+    if (btnCabinCam) {
+      btnCabinCam.style.background = '#334155';
+      btnCabinCam.style.color = '#fff';
+    }
+  } else {
+    channelBadge.className = 'badge badge-warning';
+    channelBadge.innerHTML = `<i class="fa-solid fa-user"></i> CABIN (CH ${ch})`;
+    if (btnCabinCam) {
+      btnCabinCam.style.background = '#0284c7';
+      btnCabinCam.style.color = '#fff';
+    }
+    if (btnFrontCam) {
+      btnFrontCam.style.background = '#334155';
+      btnFrontCam.style.color = '#fff';
+    }
+  }
+}
+
 function setStreamingState(streaming) {
   isStreaming = streaming;
   if (streaming) {
@@ -300,14 +328,14 @@ function refreshDevices() {
   }
 }
 
-startLiveBtn.addEventListener('click', () => {
+function requestStream(channel) {
   const simNo = deviceSelect.value;
   if (!simNo) {
     alert('Please select or connect a dashcam device first.');
     return;
   }
-  const channel = parseInt(channelSelect.value, 10);
   const streamType = parseInt(streamTypeSelect.value, 10);
+  updateChannelUI(channel);
 
   initJMuxer();
 
@@ -320,7 +348,33 @@ startLiveBtn.addEventListener('click', () => {
       mediaPort: 5023
     }));
   }
-  overlayText.textContent = 'Receiving H.264 Live Video Stream (Buffering)...';
+  overlayText.textContent = `Switching to Camera Channel ${channel}...`;
+}
+
+startLiveBtn.addEventListener('click', () => {
+  const channel = parseInt(channelSelect.value, 10);
+  requestStream(channel);
+});
+
+if (btnFrontCam) {
+  btnFrontCam.addEventListener('click', () => {
+    requestStream(1);
+  });
+}
+
+if (btnCabinCam) {
+  btnCabinCam.addEventListener('click', () => {
+    requestStream(2);
+  });
+}
+
+channelSelect.addEventListener('change', () => {
+  const channel = parseInt(channelSelect.value, 10);
+  if (isStreaming) {
+    requestStream(channel);
+  } else {
+    updateChannelUI(channel);
+  }
 });
 
 stopLiveBtn.addEventListener('click', () => {

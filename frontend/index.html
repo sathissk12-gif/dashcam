@@ -15,15 +15,14 @@
     <!-- Top Header -->
     <header class="app-header">
       <div class="logo-group">
-        <i class="fa-solid fa-video-slash logo-icon"></i>
+        <i class="fa-solid fa-video logo-icon"></i>
         <div>
           <h1>T98 Dashcam Command Center</h1>
           <p class="subtitle">JT/T 808 Signaling & JT/T 1078 Real-time Media Server</p>
         </div>
       </div>
       <div class="header-status-group">
-        <div class="badge badge-port"><i class="fa-solid fa-network-wired"></i> JT808: <span id="jt808PortDisplay">9901</span></div>
-        <div class="badge badge-port"><i class="fa-solid fa-film"></i> JT1078: <span id="jt1078PortDisplay">9902</span></div>
+        <div class="badge badge-port"><i class="fa-solid fa-network-wired"></i> Unified Port: <span id="jt808PortDisplay">5023</span></div>
         <div id="simControlBtn" class="btn-sim"><i class="fa-solid fa-robot"></i> <span id="simBtnText">Start Mock Dashcam</span></div>
       </div>
     </header>
@@ -35,6 +34,7 @@
         <div class="card-header">
           <h2><i class="fa-solid fa-camera"></i> Live Video Feed</h2>
           <div class="stream-indicators">
+            <span id="channelBadge" class="badge badge-info"><i class="fa-solid fa-video"></i> FRONT (CH 1)</span>
             <span id="liveBadge" class="badge badge-offline"><i class="fa-solid fa-circle"></i> STANDBY</span>
             <span id="fpsBadge" class="badge badge-info">0 FPS</span>
           </div>
@@ -46,6 +46,16 @@
             <i class="fa-solid fa-video-slash overlay-icon"></i>
             <p id="overlayText">Waiting for live video stream (JT1078)...</p>
           </div>
+        </div>
+
+        <!-- Quick Camera Switcher Bar -->
+        <div class="channel-switch-bar" style="display: flex; gap: 8px; margin: 10px 0;">
+          <button id="btnFrontCam" class="btn btn-primary" style="flex: 1; padding: 8px 12px; font-weight: bold;">
+            <i class="fa-solid fa-road"></i> Front Camera (CH 1)
+          </button>
+          <button id="btnCabinCam" class="btn btn-secondary" style="flex: 1; padding: 8px 12px; font-weight: bold; background: #334155; color: white;">
+            <i class="fa-solid fa-user"></i> Cabin Camera (CH 2)
+          </button>
         </div>
 
         <!-- Video Controls Bar -->
@@ -60,15 +70,17 @@
             <div class="form-group">
               <label><i class="fa-solid fa-sliders"></i> Camera Channel</label>
               <select id="channelSelect">
-                <option value="1">CH 1 - Road Facing (Front)</option>
+                <option value="1" selected>CH 1 - Road Facing (Front)</option>
                 <option value="2">CH 2 - Cabin / In-Vehicle</option>
+                <option value="64">CH 64 - Extended Front</option>
+                <option value="65">CH 65 - Extended Cabin</option>
               </select>
             </div>
             <div class="form-group">
               <label><i class="fa-solid fa-gauge-high"></i> Stream Quality</label>
               <select id="streamTypeSelect">
-                <option value="0">Main Stream (1080P/720P)</option>
-                <option value="1">Sub Stream (CIF/D1)</option>
+                <option value="1" selected>Sub Stream (Fast / Low Latency)</option>
+                <option value="0">Main Stream (1080P HD)</option>
               </select>
             </div>
           </div>
@@ -152,7 +164,7 @@
         </div>
         <div id="logsContainer" class="terminal-logs">
           <div class="log-entry system-log">
-            <span class="timestamp">[SYSTEM]</span> JT808 TCP Server (9901) & JT1078 Media Server (9902) Online. Waiting for connections...
+            <span class="timestamp">[SYSTEM]</span> Unified JT808/JT1078 Server Online. Ready for Front & Cabin Camera feeds.
           </div>
         </div>
       </section>

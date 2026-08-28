@@ -36,7 +36,6 @@ class JT808Server extends EventEmitter {
           rxBuffer = Buffer.concat([rxBuffer, chunk]);
 
           while (rxBuffer.length > 0) {
-            // 1. Check if this is a JT1078 Video Media Packet (0x30 0x31 0x63 0x64)
             const rtpIdx = this.findJt1078Sync(rxBuffer);
             const jt808Idx = rxBuffer.indexOf(0x7e);
 
@@ -72,7 +71,6 @@ class JT808Server extends EventEmitter {
               }
             }
 
-            // 2. Otherwise process JT808 Signaling Packet (0x7E)
             if (jt808Idx === -1) {
               rxBuffer = Buffer.alloc(0);
               break;
@@ -185,6 +183,7 @@ class JT808Server extends EventEmitter {
         online: true,
         authenticated: false,
         registered: false,
+        activeChannel: null,
         lastSeen: new Date(),
         location: null
       });
@@ -366,9 +365,9 @@ class JT808Server extends EventEmitter {
     }
 
     const serverIp = options.serverIp || '127.0.0.1';
-    const tcpPort = options.tcpPort || 8081;
+    const tcpPort = options.tcpPort || 5023;
     const udpPort = options.udpPort || 0;
-    const channel = options.channel || 1;
+    const channel = options.channel !== undefined ? options.channel : 1;
     const dataType = options.dataType !== undefined ? options.dataType : 0;
     const streamType = options.streamType !== undefined ? options.streamType : 0;
 
@@ -397,6 +396,7 @@ class JT808Server extends EventEmitter {
     });
 
     device.socket.write(packet);
+    device.activeChannel = channel;
 
     this.emit('packet', {
       direction: 'OUT',
@@ -409,16 +409,16 @@ class JT808Server extends EventEmitter {
     return { seqNo, simNo, channel, serverIp, tcpPort };
   }
 
-  stopLiveVideo(simNo, channel = 1) {
+  stopLiveVideo(simNo, channel = 0) {
     const device = this.devices.get(simNo);
     if (!device || !device.socket || !device.online) {
       throw new Error(`Device ${simNo} is not online`);
     }
 
     const body = Buffer.alloc(4);
-    body.writeUInt8(channel, 0);
-    body.writeUInt8(0, 1);
-    body.writeUInt8(0, 2);
+    body.writeUInt8(channel, 0); // 0 = all channels, or specific channel
+    body.writeUInt8(0, 1);       // 0 = close audio and video
+    body.writeUInt8(0, 2);       // 0 = audio & video
     body.writeUInt8(0, 3);
 
     const seqNo = this.getNextSeq();
@@ -430,13 +430,14 @@ class JT808Server extends EventEmitter {
     });
 
     device.socket.write(packet);
+    device.activeChannel = null;
 
     this.emit('packet', {
       direction: 'OUT',
       msgId: '0x9102',
       simNo,
       seqNo,
-      desc: `Stop Live Stream (Ch: ${channel})`
+      desc: `Stop Live Stream (Ch: ${channel === 0 ? 'ALL' : channel})`
     });
 
     return { seqNo, simNo, channel };
