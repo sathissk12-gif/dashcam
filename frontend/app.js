@@ -14,6 +14,7 @@ let activeDevice = null;
 let isStreaming = false;
 let isSimRunning = false;
 let frameCount = 0;
+let totalFramesReceived = 0;
 let lastFpsTime = Date.now();
 
 // DOM Elements
@@ -45,7 +46,7 @@ const signalVal = document.getElementById('signalVal');
 const mileageVal = document.getElementById('mileageVal');
 
 function initMap() {
-  const defaultPos = [13.0827, 80.2707];
+  const defaultPos = [11.2953, 77.7375];
   map = L.map('map', { zoomControl: true }).setView(defaultPos, 14);
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -63,7 +64,7 @@ function initMap() {
   });
 
   vehicleMarker = L.marker(defaultPos, { icon: customIcon }).addTo(map);
-  vehicleMarker.bindPopup("<b>Dashcam Vehicle</b><br>Waiting for GPS...").openPopup();
+  vehicleMarker.bindPopup("<b>T98 Dashcam</b><br>Connecting...").openPopup();
 
   trajectoryPath = L.polyline([], { color: '#00f2fe', weight: 4, opacity: 0.8 }).addTo(map);
 }
@@ -73,17 +74,21 @@ function initJMuxer() {
     try { jmuxer.destroy(); } catch (e) {}
   }
 
+  playerEl.muted = true;
+
   jmuxer = new JMuxer({
     node: 'player',
     mode: 'video',
-    flushingTime: 0,
+    flushingTime: 50,
     clearBuffer: true,
     fps: 25,
     debug: false,
     onError: function(data) {
-      console.warn('JMuxer warning/error:', data);
+      console.warn('JMuxer event:', data);
     }
   });
+
+  playerEl.play().catch(() => {});
 }
 
 function connectWebSocket() {
@@ -119,17 +124,23 @@ function connectWebSocket() {
 }
 
 function handleVideoFrame(arrayBuffer) {
+  totalFramesReceived++;
+  frameCount++;
+
   if (!isStreaming) {
     setStreamingState(true);
   }
 
-  frameCount++;
   const uint8 = new Uint8Array(arrayBuffer);
 
   if (jmuxer) {
     jmuxer.feed({
       video: uint8
     });
+  }
+
+  if (videoOverlay && !videoOverlay.classList.contains('hidden')) {
+    videoOverlay.classList.add('hidden');
   }
 
   const now = Date.now();
@@ -144,8 +155,8 @@ function handleVideoFrame(arrayBuffer) {
 function handleJsonMessage(msg) {
   switch (msg.type) {
     case 'server_info':
-      if (jt808PortDisplay && msg.jt808Port) jt808PortDisplay.textContent = msg.jt808Port;
-      if (jt1078PortDisplay && msg.jt1078Port) jt1078PortDisplay.textContent = msg.jt1078Port;
+      if (jt808PortDisplay) jt808PortDisplay.textContent = '5023';
+      if (jt1078PortDisplay) jt1078PortDisplay.textContent = '5023';
       break;
 
     case 'device_list':
@@ -305,10 +316,11 @@ startLiveBtn.addEventListener('click', () => {
       action: 'start_stream',
       simNo,
       channel,
-      streamType
+      streamType,
+      mediaPort: 5023
     }));
   }
-  overlayText.textContent = 'Sending 0x9101 request to Dashcam...';
+  overlayText.textContent = 'Receiving H.264 Live Video Stream (Buffering)...';
 });
 
 stopLiveBtn.addEventListener('click', () => {
