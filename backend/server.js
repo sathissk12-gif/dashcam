@@ -5,7 +5,6 @@ const { WebSocketServer, WebSocket } = require('ws');
 const os = require('os');
 const fs = require('fs');
 
-// Load environment variables from .env if present
 if (fs.existsSync(path.join(__dirname, '.env'))) {
   const envContent = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
   envContent.split('\n').forEach(line => {
@@ -21,9 +20,8 @@ const JT1078Server = require('./src/jt1078/server');
 const DashcamSimulator = require('./src/simulator/dashcam_sim');
 
 const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
-const JT808_PORT = parseInt(process.env.JT808_PORT || '9901', 10);      // Primary Signaling (9901)
-const JT808_ALT_PORT = parseInt(process.env.JT808_ALT_PORT || '9092', 10); // Alt Signaling (9092)
-const JT1078_PORT = parseInt(process.env.JT1078_PORT || '9902', 10);    // Video Media (9902)
+const JT1078_PORT = parseInt(process.env.JT1078_PORT || '9902', 10);
+const JT1078_ALT_PORT = 1078;
 let publicIp = process.env.PUBLIC_IP || null;
 
 function getLocalIp() {
@@ -57,7 +55,6 @@ async function detectPublicIp() {
 
 detectPublicIp();
 
-// 1. Initialize Express App (Serving ../frontend)
 const app = express();
 const frontendDir = path.join(__dirname, '../frontend');
 app.use(express.static(frontendDir));
@@ -67,16 +64,13 @@ app.get('/api/status', (req, res) => {
     status: 'online',
     serverIp: publicIp || localServerIp,
     localIp: localServerIp,
-    jt808Port: JT808_PORT,
-    jt808AltPort: JT808_ALT_PORT,
+    listeningPorts: activePorts,
     jt1078Port: JT1078_PORT,
     devicesCount: jt808Servers.reduce((acc, s) => acc + s.devices.size, 0)
   });
 });
 
 const httpServer = http.createServer(app);
-
-// 2. Initialize WebSocket Server
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
 function broadcastJson(obj) {
@@ -96,10 +90,13 @@ function broadcastBinary(binaryData) {
   });
 }
 
-// 3. Initialize Protocol Servers (Multi-port listeners for max compatibility)
-const listeningPorts = Array.from(new Set([JT808_PORT, JT808_ALT_PORT]));
-const jt808Servers = listeningPorts.map(p => new JT808Server({ port: p }));
+// Multi-port listeners: Supports 5023 (Camera current target), 9901, 7788, 9092
+const candidatePorts = [5023, 9901, 7788, 9092];
+const jt808Servers = candidatePorts.map(p => new JT808Server({ port: p }));
+const activePorts = [];
+
 const jt1078Server = new JT1078Server({ port: JT1078_PORT });
+const jt1078AltServer = new JT1078Server({ port: JT1078_ALT_PORT });
 
 let activeSimulator = null;
 
@@ -141,23 +138,27 @@ function setupJT808Handlers(serverInstance, portName) {
 }
 
 jt808Servers.forEach((serverInstance, idx) => {
-  setupJT808Handlers(serverInstance, listeningPorts[idx]);
+  setupJT808Handlers(serverInstance, candidatePorts[idx]);
 });
 
-// JT1078 Server Events
-jt1078Server.on('packet', (data) => {
-  broadcastJson({
-    type: 'packet_log',
-    protocol: 'JT1078',
-    direction: 'MEDIA',
-    msgId: `[${data.dataType}]`,
-    desc: `Ch:${data.channel} Seq:${data.seqNo} Sub:${data.subpackage} Len:${data.bodyLen}B`
+function setupJT1078Handlers(mediaServer) {
+  mediaServer.on('packet', (data) => {
+    broadcastJson({
+      type: 'packet_log',
+      protocol: 'JT1078',
+      direction: 'MEDIA',
+      msgId: `[${data.dataType}]`,
+      desc: `Ch:${data.channel} Seq:${data.seqNo} Sub:${data.subpackage} Len:${data.bodyLen}B`
+    });
   });
-});
 
-jt1078Server.on('video_frame', (frame) => {
-  broadcastBinary(frame.data);
-});
+  mediaServer.on('video_frame', (frame) => {
+    broadcastBinary(frame.data);
+  });
+}
+
+setupJT1078Handlers(jt1078Server);
+setupJT1078Handlers(jt1078AltServer);
 
 function broadcastDeviceList() {
   const devices = [];
@@ -177,14 +178,13 @@ function broadcastDeviceList() {
   broadcastJson({ type: 'device_list', devices, serverIp: publicIp || localServerIp });
 }
 
-// WebSocket Client Commands
 wss.on('connection', (ws) => {
   console.log('[WebSocket] Web client connected.');
   broadcastDeviceList();
   ws.send(JSON.stringify({
     type: 'server_info',
     serverIp: publicIp || localServerIp,
-    jt808Port: JT808_PORT,
+    listeningPorts: activePorts,
     jt1078Port: JT1078_PORT
   }));
   ws.send(JSON.stringify({ type: 'sim_status', running: !!activeSimulator }));
@@ -201,7 +201,6 @@ wss.on('connection', (ws) => {
 
 function handleWsClientMessage(clientWs, data) {
   const { action, simNo, channel = 1, streamType = 0, customIp } = data;
-  
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
   const videoMediaIp = customIp || publicIp || localServerIp;
 
@@ -258,7 +257,7 @@ function handleWsClientMessage(clientWs, data) {
       } else {
         activeSimulator = new DashcamSimulator({
           serverHost: '127.0.0.1',
-          jt808Port: JT808_PORT,
+          jt808Port: 5023,
           simNo: '013800138000'
         });
         activeSimulator.start();
@@ -274,6 +273,7 @@ async function startAll() {
   for (const s of jt808Servers) {
     try {
       await s.start();
+      activePorts.push(s.port);
       console.log(`📡 JT808 TCP Server listening on port ${s.port}`);
     } catch (e) {
       console.warn(`Could not bind JT808 on port ${s.port}: ${e.message}`);
@@ -286,6 +286,11 @@ async function startAll() {
   } catch (e) {
     console.warn(`Could not bind JT1078 on port ${JT1078_PORT}: ${e.message}`);
   }
+
+  try {
+    await jt1078AltServer.start();
+    console.log(`🎥 JT1078 Alt Media TCP Server listening on port ${JT1078_ALT_PORT}`);
+  } catch (e) {}
 
   httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
     console.log(`🚀 Web Dashboard available at http://0.0.0.0:${HTTP_PORT}`);
