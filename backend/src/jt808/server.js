@@ -227,6 +227,39 @@ class JT808Server extends EventEmitter {
     }
   }
 
+  // Disable sleep & wake up video sensor (0x8103)
+  disableSleepMode(simNo) {
+    const device = this.devices.get(simNo);
+    if (!device || !device.socket || !device.online) {
+      throw new Error(`Device ${simNo} is not online`);
+    }
+
+    // 0x8103: Param count = 1, Param 0x0075 (Sleep param) = 0x00 (No sleep)
+    const body = Buffer.alloc(1 + 4 + 1 + 4);
+    body.writeUInt8(1, 0); // 1 param
+    body.writeUInt32BE(0x0075, 1); // 0x0075: Audio/Video sleep mode
+    body.writeUInt8(4, 5); // 4 bytes len
+    body.writeUInt32BE(0x00000000, 6); // 0 = Disable sleep
+
+    const seqNo = this.getNextSeq();
+    const packet = buildJT808Packet({
+      msgId: 0x8103,
+      simNo,
+      seqNo,
+      body
+    });
+
+    device.socket.write(packet);
+
+    this.emit('packet', {
+      direction: 'OUT',
+      msgId: '0x8103',
+      simNo,
+      seqNo,
+      desc: 'Set Parameters: Disable Audio/Video Sleep Mode (0x0075 = 0)'
+    });
+  }
+
   requestLiveVideo(simNo, options = {}) {
     const device = this.devices.get(simNo);
     if (!device || !device.socket || !device.online) {
@@ -234,7 +267,7 @@ class JT808Server extends EventEmitter {
     }
 
     const serverIp = options.serverIp || '127.0.0.1';
-    const tcpPort = options.tcpPort || 1078;
+    const tcpPort = options.tcpPort || 8081;
     const udpPort = options.udpPort || 0;
     const channel = options.channel || 1;
     const dataType = options.dataType !== undefined ? options.dataType : 0;

@@ -20,7 +20,6 @@ const JT1078Server = require('./src/jt1078/server');
 const DashcamSimulator = require('./src/simulator/dashcam_sim');
 
 const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
-// Media port: Default to 8081 (which is open on VPS) or allow override
 const DEFAULT_MEDIA_PORT = 8081;
 let publicIp = process.env.PUBLIC_IP || null;
 
@@ -228,7 +227,16 @@ function handleWsClientMessage(clientWs, data) {
 
     case 'start_stream': {
       try {
-        console.log(`[Command] Requesting Live Video from ${simNo} (Target Media: ${videoMediaIp}:${videoMediaPort}, Ch:${channel})...`);
+        console.log(`[Command] Waking up and requesting Live Video from ${simNo} (Target Media: ${videoMediaIp}:${videoMediaPort}, Ch:${channel})...`);
+        
+        // 1. Force Wakeup / Disable Sleep Mode (0x8103)
+        try {
+          targetServer.disableSleepMode(simNo);
+        } catch (e) {
+          console.warn('Wakeup command warning:', e.message);
+        }
+
+        // 2. Request Live Video Stream (0x9101)
         const reqResult = targetServer.requestLiveVideo(simNo, {
           serverIp: videoMediaIp,
           tcpPort: videoMediaPort,
@@ -237,6 +245,7 @@ function handleWsClientMessage(clientWs, data) {
           dataType: 0, // Audio & Video
           streamType: parseInt(streamType, 10)
         });
+
         clientWs.send(JSON.stringify({
           type: 'stream_started',
           ...reqResult
