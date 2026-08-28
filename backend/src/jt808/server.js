@@ -1,6 +1,6 @@
 const net = require('net');
 const EventEmitter = require('events');
-const { parseJT808Frame, buildJT808Packet, parseLocationReport } = require('./codec');
+const { parseJT808Frame, buildJT808Packet, parseLocationReport, bcdToString } = require('./codec');
 
 class JT808Server extends EventEmitter {
   constructor(options = {}) {
@@ -8,11 +8,21 @@ class JT808Server extends EventEmitter {
     this.port = options.port || 7788;
     this.devices = new Map();
     this.serverSeq = 0;
+    this.frameAssemblers = new Map();
   }
 
   getNextSeq() {
     this.serverSeq = (this.serverSeq + 1) & 0xffff;
     return this.serverSeq;
+  }
+
+  findJt1078Sync(buf) {
+    for (let i = 0; i <= buf.length - 4; i++) {
+      if (buf[i] === 0x30 && buf[i + 1] === 0x31 && buf[i + 2] === 0x63 && buf[i + 3] === 0x64) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   start() {
@@ -26,21 +36,55 @@ class JT808Server extends EventEmitter {
           rxBuffer = Buffer.concat([rxBuffer, chunk]);
 
           while (rxBuffer.length > 0) {
-            const startIdx = rxBuffer.indexOf(0x7e);
-            if (startIdx === -1) {
+            // 1. Check if this is a JT1078 Video Media Packet (0x30 0x31 0x63 0x64)
+            const rtpIdx = this.findJt1078Sync(rxBuffer);
+            const jt808Idx = rxBuffer.indexOf(0x7e);
+
+            if (rtpIdx !== -1 && (jt808Idx === -1 || rtpIdx < jt808Idx)) {
+              if (rtpIdx > 0) rxBuffer = rxBuffer.subarray(rtpIdx);
+              if (rxBuffer.length < 30) break;
+
+              try {
+                const dataTypeSub = rxBuffer[15];
+                const dataType = (dataTypeSub >> 4) & 0x0f;
+                const subpackage = dataTypeSub & 0x0f;
+                const isVideo = dataType <= 2;
+                const isAudio = dataType === 3;
+                const headerLen = isVideo ? 30 : (isAudio ? 26 : 16);
+
+                if (rxBuffer.length < headerLen) break;
+
+                let bodyLen = 0;
+                if (isVideo) bodyLen = rxBuffer.readUInt16BE(28);
+                else if (isAudio) bodyLen = rxBuffer.readUInt16BE(24);
+
+                const totalLen = headerLen + bodyLen;
+                if (rxBuffer.length < totalLen) break;
+
+                const packet = rxBuffer.subarray(0, totalLen);
+                rxBuffer = rxBuffer.subarray(totalLen);
+
+                this.handleJt1078Packet(packet, { headerLen, bodyLen, dataType, subpackage, isVideo });
+                continue;
+              } catch (e) {
+                rxBuffer = rxBuffer.subarray(4);
+                continue;
+              }
+            }
+
+            // 2. Otherwise process JT808 Signaling Packet (0x7E)
+            if (jt808Idx === -1) {
               rxBuffer = Buffer.alloc(0);
               break;
             }
 
-            const endIdx = rxBuffer.indexOf(0x7e, startIdx + 1);
+            const endIdx = rxBuffer.indexOf(0x7e, jt808Idx + 1);
             if (endIdx === -1) {
-              if (startIdx > 0) {
-                rxBuffer = rxBuffer.subarray(startIdx);
-              }
+              if (jt808Idx > 0) rxBuffer = rxBuffer.subarray(jt808Idx);
               break;
             }
 
-            const frameBuf = rxBuffer.subarray(startIdx, endIdx + 1);
+            const frameBuf = rxBuffer.subarray(jt808Idx, endIdx + 1);
             rxBuffer = rxBuffer.subarray(endIdx + 1);
 
             try {
@@ -72,6 +116,63 @@ class JT808Server extends EventEmitter {
 
       this.server.on('error', (err) => reject(err));
     });
+  }
+
+  handleJt1078Packet(packet, meta) {
+    const pt = packet[5] & 0x7f;
+    const seqNo = packet.readUInt16BE(6);
+    const simNo = bcdToString(packet.subarray(8, 14));
+    const channel = packet[14];
+    const { headerLen, bodyLen, dataType, subpackage, isVideo } = meta;
+
+    const payload = packet.subarray(headerLen, headerLen + bodyLen);
+    const streamKey = `${simNo}_${channel}`;
+    const dataTypeName = ['I-Frame', 'P-Frame', 'B-Frame', 'Audio', 'Transparent'][dataType] || `Type-${dataType}`;
+    const subpackageNames = ['Atomic', 'First', 'Last', 'Intermediate'];
+
+    this.emit('media_packet', {
+      simNo,
+      channel,
+      seqNo,
+      pt,
+      dataType: dataTypeName,
+      subpackage: subpackageNames[subpackage] || subpackage,
+      bodyLen,
+      timestamp: Date.now()
+    });
+
+    if (isVideo) {
+      if (subpackage === 0) {
+        this.emit('video_frame', {
+          simNo,
+          channel,
+          pt,
+          isKeyframe: dataType === 0,
+          data: payload
+        });
+      } else if (subpackage === 1) {
+        this.frameAssemblers.set(streamKey, [payload]);
+      } else if (subpackage === 3) {
+        if (this.frameAssemblers.has(streamKey)) {
+          this.frameAssemblers.get(streamKey).push(payload);
+        }
+      } else if (subpackage === 2) {
+        if (this.frameAssemblers.has(streamKey)) {
+          const parts = this.frameAssemblers.get(streamKey);
+          parts.push(payload);
+          const fullFrame = Buffer.concat(parts);
+          this.frameAssemblers.delete(streamKey);
+
+          this.emit('video_frame', {
+            simNo,
+            channel,
+            pt,
+            isKeyframe: dataType === 0,
+            data: fullFrame
+          });
+        }
+      }
+    }
   }
 
   handleMessage(socket, parsed) {
@@ -227,19 +328,17 @@ class JT808Server extends EventEmitter {
     }
   }
 
-  // Disable sleep & wake up video sensor (0x8103)
   disableSleepMode(simNo) {
     const device = this.devices.get(simNo);
     if (!device || !device.socket || !device.online) {
       throw new Error(`Device ${simNo} is not online`);
     }
 
-    // 0x8103: Param count = 1, Param 0x0075 (Sleep param) = 0x00 (No sleep)
     const body = Buffer.alloc(1 + 4 + 1 + 4);
-    body.writeUInt8(1, 0); // 1 param
-    body.writeUInt32BE(0x0075, 1); // 0x0075: Audio/Video sleep mode
-    body.writeUInt8(4, 5); // 4 bytes len
-    body.writeUInt32BE(0x00000000, 6); // 0 = Disable sleep
+    body.writeUInt8(1, 0);
+    body.writeUInt32BE(0x0075, 1);
+    body.writeUInt8(4, 5);
+    body.writeUInt32BE(0x00000000, 6);
 
     const seqNo = this.getNextSeq();
     const packet = buildJT808Packet({

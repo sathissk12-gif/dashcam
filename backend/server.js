@@ -110,6 +110,21 @@ function setupJT808Handlers(serverInstance, portName) {
     });
   });
 
+  serverInstance.on('media_packet', (data) => {
+    broadcastJson({
+      type: 'packet_log',
+      protocol: `JT1078 (${portName})`,
+      direction: 'MEDIA',
+      msgId: `[${data.dataType}]`,
+      desc: `Ch:${data.channel} Seq:${data.seqNo} Sub:${data.subpackage} Len:${data.bodyLen}B`
+    });
+  });
+
+  serverInstance.on('video_frame', (frame) => {
+    console.log(`[Video:${portName}] Live Video Frame! Size: ${frame.data.length}B, Keyframe: ${frame.isKeyframe}`);
+    broadcastBinary(frame.data);
+  });
+
   serverInstance.on('device_registered', ({ simNo, authCode }) => {
     console.log(`[JT808:${portName}] Device Registered: ${simNo}`);
     broadcastJson({
