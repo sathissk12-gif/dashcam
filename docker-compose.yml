@@ -6,12 +6,16 @@ services:
     container_name: dashcam-server
     restart: always
     ports:
-      - "3000:3000"   # Web Dashboard
-      - "7788:7788"   # JT808 Primary Signaling Port
-      - "8088:8088"   # JT808 Alt Signaling Port
-      - "1078:1078"   # JT1078 Video Media Port
+      - "9090:9090"   # Web Dashboard (Port 9090)
+      - "3000:3000"   # Web Dashboard (Port 3000)
+      - "5023:5023"   # JT808 Primary Signaling Port
+      - "7788:7788"   # JT808 Alt Signaling Port
+      - "9901:9901"   # JT808 Alt Signaling Port
+      - "1078:1078"   # JT1078 Primary Video Media Port
+      - "9902:9902"   # JT1078 Alt Video Media Port
     environment:
-      - PORT=3000
-      - JT808_PORT=7788
-      - JT808_ALT_PORT=8088
+      - PORT=9090
+      - JT808_PORT=5023
+      - JT808_ALT1=7788
+      - JT808_ALT2=9901
       - JT1078_PORT=1078
