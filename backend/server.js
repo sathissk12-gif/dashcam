@@ -20,7 +20,8 @@ const JT1078Server = require('./src/jt1078/server');
 const DashcamSimulator = require('./src/simulator/dashcam_sim');
 
 const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
-const JT1078_PORT = parseInt(process.env.JT1078_PORT || '8081', 10); // 8081 is open on VPS
+// Media port: Default to 8081 (which is open on VPS) or allow override
+const DEFAULT_MEDIA_PORT = 8081;
 let publicIp = process.env.PUBLIC_IP || null;
 
 function getLocalIp() {
@@ -165,6 +166,7 @@ function setupJT1078Handlers(mediaServer, portName) {
   });
 
   mediaServer.on('video_frame', (frame) => {
+    console.log(`[JT1078:${portName}] Video frame received! Length: ${frame.data.length} bytes`);
     broadcastBinary(frame.data);
   });
 }
@@ -198,7 +200,8 @@ wss.on('connection', (ws) => {
     type: 'server_info',
     serverIp: publicIp || localServerIp,
     jt808Ports: activeJt808Ports,
-    jt1078Port: JT1078_PORT
+    jt1078Ports: activeJt1078Ports,
+    defaultMediaPort: DEFAULT_MEDIA_PORT
   }));
   ws.send(JSON.stringify({ type: 'sim_status', running: !!activeSimulator }));
 
@@ -213,9 +216,10 @@ wss.on('connection', (ws) => {
 });
 
 function handleWsClientMessage(clientWs, data) {
-  const { action, simNo, channel = 1, streamType = 0, customIp } = data;
+  const { action, simNo, channel = 1, streamType = 0, customIp, mediaPort } = data;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
   const videoMediaIp = customIp || publicIp || localServerIp;
+  const videoMediaPort = parseInt(mediaPort || DEFAULT_MEDIA_PORT, 10);
 
   switch (action) {
     case 'get_devices':
@@ -224,10 +228,11 @@ function handleWsClientMessage(clientWs, data) {
 
     case 'start_stream': {
       try {
-        console.log(`[Command] Requesting Live Video from ${simNo} (Media Target: ${videoMediaIp}:${JT1078_PORT}, Ch:${channel})...`);
+        console.log(`[Command] Requesting Live Video from ${simNo} (Target Media: ${videoMediaIp}:${videoMediaPort}, Ch:${channel})...`);
         const reqResult = targetServer.requestLiveVideo(simNo, {
           serverIp: videoMediaIp,
-          tcpPort: JT1078_PORT,
+          tcpPort: videoMediaPort,
+          udpPort: 0,
           channel: parseInt(channel, 10),
           dataType: 0, // Audio & Video
           streamType: parseInt(streamType, 10)
