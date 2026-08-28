@@ -18,6 +18,7 @@ if (fs.existsSync(path.join(__dirname, '.env'))) {
 const JT808Server = require('./src/jt808/server');
 const JT1078Server = require('./src/jt1078/server');
 const DashcamSimulator = require('./src/simulator/dashcam_sim');
+const geocoder = require('./src/utils/geocoder');
 
 const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
 const DEFAULT_MEDIA_PORT = 5023;
@@ -102,11 +103,23 @@ app.get('/api/status', (req, res) => {
     localIp: localServerIp,
     jt808Ports: activeJt808Ports,
     devicesCount: jt808Servers.reduce((acc, s) => acc + s.devices.size, 0),
-    linkedVehiclesCount: Object.keys(vehicleLinks).length
+    linkedVehiclesCount: Object.keys(vehicleLinks).length,
+    geocoderProvider: process.env.OLA_MAPS_API_KEY ? 'Ola Maps' : 'OpenStreetMap'
   });
 });
 
-// 2. Vehicle-Camera Link Registry APIs
+// 2. On-demand Reverse Geocoding API
+app.get('/api/geocode', async (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  if (isNaN(lat) || isNaN(lng)) {
+    return res.status(400).json({ error: 'lat and lng parameters required' });
+  }
+  const address = await geocoder.getAddress(lat, lng);
+  res.json({ success: true, lat, lng, address });
+});
+
+// 3. Vehicle-Camera Link Registry APIs
 app.get('/api/vehicles/links', (req, res) => {
   res.json({
     success: true,
@@ -242,10 +255,17 @@ function setupJT808Handlers(serverInstance, portName) {
     broadcastDeviceList();
   });
 
-  serverInstance.on('device_location', (locData) => {
+  serverInstance.on('device_location', async (locData) => {
+    // Reverse Geocode with Smart Caching & Ola Maps support
+    let address = 'Loading Address...';
+    try {
+      address = await geocoder.getAddress(locData.latitude, locData.longitude, locData.simNo);
+    } catch (e) {}
+
     broadcastJson({
       type: 'device_location',
-      ...locData
+      ...locData,
+      address
     });
   });
 
