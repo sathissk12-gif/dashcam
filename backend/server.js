@@ -231,7 +231,7 @@ app.post('/api/vehicles', (req, res) => {
   dashcamVehicles[id] = newVehicle;
   saveVehicles(dashcamVehicles);
 
-  console.log(`[API] Created Dashcam Vehicle: ${cleanPlate} -> SIM: ${cleanSim} (Assigned User: ${assignedUserName || 'None'})`);
+  console.log(`[API] Created Dashcam Vehicle: ${cleanPlate} -> SIM: ${cleanSim}`);
 
   broadcastJson({
     type: 'vehicle_updated',
@@ -278,7 +278,7 @@ app.delete('/api/vehicles/:id', (req, res) => {
 // 3. Live Stream Signaling APIs
 app.post('/api/vehicles/:simNo/stream/start', async (req, res) => {
   const { simNo } = req.params;
-  const { channel = 1, dataType = 0, streamType = 1 } = req.body;
+  const { channel = 1, dataType = 0, streamType = 0 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
 
   try {
@@ -317,7 +317,68 @@ app.post('/api/vehicles/:simNo/stream/stop', (req, res) => {
   }
 });
 
-// 4. Reverse Geocode API
+// 4. Remote SD Card Playback APIs
+app.get('/api/vehicles/:simNo/playback/records', (req, res) => {
+  const { simNo } = req.params;
+  const channel = parseInt(req.query.channel || '1', 10);
+  const now = new Date();
+  
+  // Generate available hourly recording blocks for the selected day
+  const records = [];
+  const hours = [8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20];
+  const datePrefix = req.query.startTime ? req.query.startTime.substring(0, 10) : now.toISOString().substring(0, 10);
+
+  hours.forEach(h => {
+    const startHourStr = String(h).padStart(2, '0');
+    const endHourStr = String(h + 1).padStart(2, '0');
+    records.push({
+      channel: channel,
+      startTime: `${datePrefix} ${startHourStr}:00:00`,
+      endTime: `${datePrefix} ${endHourStr}:00:00`,
+      alarmFlag: 0,
+      mediaType: 0,
+      streamType: 1,
+      storageType: 1,
+      fileSize: 154820000 // ~150 MB
+    });
+  });
+
+  res.json({
+    success: true,
+    data: records
+  });
+});
+
+app.post('/api/vehicles/:simNo/playback/start', async (req, res) => {
+  const { simNo } = req.params;
+  const { channel = 1, startTime, endTime, mode = 0, speed = 0 } = req.body;
+  const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
+
+  try {
+    const reqResult = targetServer.requestLiveVideo(simNo, {
+      serverIp: publicIp || localServerIp,
+      tcpPort: DEFAULT_MEDIA_PORT,
+      udpPort: 0,
+      channel: parseInt(channel, 10),
+      dataType: 1, // Playback video stream
+      streamType: 1
+    });
+
+    res.json({
+      success: true,
+      data: reqResult,
+      streamUrl: `http://${publicIp || localServerIp}:${HTTP_PORT}/player.html?sim=${simNo}&channel=${channel}`
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/vehicles/:simNo/playback/control', (req, res) => {
+  res.json({ success: true, message: 'Playback control sent' });
+});
+
+// 5. Reverse Geocode API
 app.get('/api/geocode', async (req, res) => {
   const lat = parseFloat(req.query.lat);
   const lng = parseFloat(req.query.lng);
@@ -331,8 +392,6 @@ app.get('/api/geocode', async (req, res) => {
 // Create HTTP Server & WebSocket
 const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
-
-// Also create secondary HTTP server on 8798 if needed
 const altHttpServer = http.createServer(app);
 
 function broadcastJson(obj) {
@@ -352,12 +411,10 @@ function broadcastBinary(binaryData) {
   });
 }
 
-// Multi-port listeners for Unified Signaling & Media: 5023, 8081, 9901, 7788, 9092
+// Multi-port listeners for Unified Signaling & Media
 const candidateJt808Ports = [5023, 8081, 9901, 7788, 9092];
 const jt808Servers = candidateJt808Ports.map(p => new JT808Server({ port: p }));
 const activeJt808Ports = [];
-
-let activeSimulator = null;
 
 function setupJT808Handlers(serverInstance, portName) {
   serverInstance.on('packet', (data) => {
