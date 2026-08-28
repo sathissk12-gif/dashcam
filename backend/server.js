@@ -104,10 +104,18 @@ app.get('/api/status', (req, res) => {
     localIp: localServerIp,
     jt808Ports: activeJt808Ports,
     devicesCount: jt808Servers.reduce((acc, s) => acc + s.devices.size, 0),
-    totalVehicles: Object.keys(dashcamVehicles).length,
+    totalVehicles: getDistinctVehicles().length,
     geocoderProvider: process.env.OLA_MAPS_API_KEY ? 'Ola Maps' : 'OpenStreetMap'
   });
 });
+
+function getDistinctVehicles() {
+  const map = new Map();
+  Object.values(dashcamVehicles).forEach(v => {
+    if (v && v.id) map.set(v.id, v);
+  });
+  return Array.from(map.values());
+}
 
 // Helper: Format vehicle for Flutter DashcamVehicle model
 function formatVehicleObj(v) {
@@ -149,7 +157,7 @@ function formatVehicleObj(v) {
 
 // 2. Vehicles CRUD for Flutter App DashcamApiService
 app.get('/api/vehicles', (req, res) => {
-  const list = Object.values(dashcamVehicles).map(formatVehicleObj);
+  const list = getDistinctVehicles().map(formatVehicleObj);
   res.json({
     success: true,
     data: list
@@ -196,7 +204,6 @@ app.post('/api/vehicles', (req, res) => {
   };
 
   dashcamVehicles[id] = newVehicle;
-  dashcamVehicles[cleanSim] = newVehicle; // Also index by SIM for easy lookup
   saveVehicles(dashcamVehicles);
 
   console.log(`[API] Created Dashcam Vehicle: ${cleanPlate} -> SIM: ${cleanSim}`);
@@ -232,9 +239,7 @@ app.delete('/api/vehicles/:id', (req, res) => {
   const { id } = req.params;
   let deleted = false;
   if (dashcamVehicles[id]) {
-    const sim = dashcamVehicles[id].simNo;
     delete dashcamVehicles[id];
-    if (sim && dashcamVehicles[sim]) delete dashcamVehicles[sim];
     deleted = true;
   }
   if (deleted) {
@@ -422,7 +427,7 @@ function broadcastDeviceList() {
     type: 'device_list',
     devices,
     serverIp: publicIp || localServerIp,
-    vehicles: Object.values(dashcamVehicles).map(formatVehicleObj)
+    vehicles: getDistinctVehicles().map(formatVehicleObj)
   });
 }
 
