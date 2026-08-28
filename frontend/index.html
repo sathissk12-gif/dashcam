@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashcam Live Monitor - JT808 & JT1078 Server</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/jmuxer@2.0.5/dist/jmuxer.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="logo-group">
+        <i class="fa-solid fa-video-slash logo-icon"></i>
+        <div>
+          <h1>T98 Dashcam Command Center</h1>
+          <p class="subtitle">JT/T 808 Signaling & JT/T 1078 Real-time Media Server</p>
+        </div>
+      </div>
+      <div class="header-status-group">
+        <div class="badge badge-port"><i class="fa-solid fa-network-wired"></i> JT808: <span id="jt808PortDisplay">7788</span></div>
+        <div class="badge badge-port"><i class="fa-solid fa-film"></i> JT1078: <span id="jt1078PortDisplay">1078</span></div>
+        <div id="simControlBtn" class="btn-sim"><i class="fa-solid fa-robot"></i> <span id="simBtnText">Start Mock Dashcam</span></div>
+      </div>
+    </header>
+
+    <!-- Main Grid Layout -->
+    <div class="dashboard-grid">
+      <!-- Left Column: Video Player & Controls -->
+      <section class="card video-section">
+        <div class="card-header">
+          <h2><i class="fa-solid fa-camera"></i> Live Video Feed</h2>
+          <div class="stream-indicators">
+            <span id="liveBadge" class="badge badge-offline"><i class="fa-solid fa-circle"></i> STANDBY</span>
+            <span id="fpsBadge" class="badge badge-info">0 FPS</span>
+          </div>
+        </div>
+
+        <div class="video-wrapper">
+          <video id="player" autoplay muted playsinline></video>
+          <div id="videoOverlay" class="video-overlay">
+            <i class="fa-solid fa-video-slash overlay-icon"></i>
+            <p id="overlayText">Waiting for live video stream (JT1078)...</p>
+          </div>
+        </div>
+
+        <!-- Video Controls Bar -->
+        <div class="controls-panel">
+          <div class="control-inputs">
+            <div class="form-group">
+              <label><i class="fa-solid fa-satellite-dish"></i> Target Device</label>
+              <select id="deviceSelect">
+                <option value="">No device connected</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label><i class="fa-solid fa-sliders"></i> Camera Channel</label>
+              <select id="channelSelect">
+                <option value="1">CH 1 - Road Facing (Front)</option>
+                <option value="2">CH 2 - Cabin / In-Vehicle</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label><i class="fa-solid fa-gauge-high"></i> Stream Quality</label>
+              <select id="streamTypeSelect">
+                <option value="0">Main Stream (1080P/720P)</option>
+                <option value="1">Sub Stream (CIF/D1)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="button-row">
+            <button id="startLiveBtn" class="btn btn-primary">
+              <i class="fa-solid fa-play"></i> Request Live Stream (0x9101)
+            </button>
+            <button id="stopLiveBtn" class="btn btn-danger" disabled>
+              <i class="fa-solid fa-stop"></i> Stop Stream (0x9102)
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Column Top: GPS Live Map -->
+      <section class="card map-section">
+        <div class="card-header">
+          <h2><i class="fa-solid fa-map-location-dot"></i> Real-time GPS Live Tracking</h2>
+          <span id="gpsStatusBadge" class="badge badge-warning">No GPS Lock</span>
+        </div>
+        <div id="map" class="map-container"></div>
+      </section>
+
+      <!-- Bottom Left: Telemetry & Vehicle Stats -->
+      <section class="card telemetry-section">
+        <div class="card-header">
+          <h2><i class="fa-solid fa-chart-line"></i> Vehicle Telemetry (0x0200)</h2>
+        </div>
+        <div class="telemetry-grid">
+          <div class="stat-box">
+            <i class="fa-solid fa-gauge stat-icon"></i>
+            <div class="stat-info">
+              <span class="stat-label">Vehicle Speed</span>
+              <span id="speedVal" class="stat-val">0.0 <small>km/h</small></span>
+            </div>
+          </div>
+          <div class="stat-box">
+            <i class="fa-solid fa-compass stat-icon"></i>
+            <div class="stat-info">
+              <span class="stat-label">Heading / Direction</span>
+              <span id="headingVal" class="stat-val">0° <small>North</small></span>
+            </div>
+          </div>
+          <div class="stat-box">
+            <i class="fa-solid fa-key stat-icon"></i>
+            <div class="stat-info">
+              <span class="stat-label">ACC Ignition</span>
+              <span id="accVal" class="stat-val status-acc-off">OFF</span>
+            </div>
+          </div>
+          <div class="stat-box">
+            <i class="fa-solid fa-satellite stat-icon"></i>
+            <div class="stat-info">
+              <span class="stat-label">GNSS Satellites</span>
+              <span id="satVal" class="stat-val">0</span>
+            </div>
+          </div>
+          <div class="stat-box">
+            <i class="fa-solid fa-signal stat-icon"></i>
+            <div class="stat-info">
+              <span class="stat-label">4G LTE Signal</span>
+              <span id="signalVal" class="stat-val">-- / 31</span>
+            </div>
+          </div>
+          <div class="stat-box">
+            <i class="fa-solid fa-road stat-icon"></i>
+            <div class="stat-info">
+              <span class="stat-label">Odometer</span>
+              <span id="mileageVal" class="stat-val">0.0 <small>km</small></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bottom Right: Live Protocol Packets Log Terminal -->
+      <section class="card logs-section">
+        <div class="card-header">
+          <h2><i class="fa-solid fa-terminal"></i> Protocol Stream Console</h2>
+          <button id="clearLogsBtn" class="btn-sm"><i class="fa-solid fa-trash"></i> Clear</button>
+        </div>
+        <div id="logsContainer" class="terminal-logs">
+          <div class="log-entry system-log">
+            <span class="timestamp">[SYSTEM]</span> JT808 TCP Server & JT1078 Media Server Online. Waiting for connections...
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

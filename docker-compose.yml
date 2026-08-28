@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  dashcam-server:
+    build: .
+    container_name: dashcam-server
+    restart: always
+    ports:
+      - "3000:3000"   # Web Dashboard
+      - "7788:7788"   # JT808 Primary Signaling Port
+      - "8088:8088"   # JT808 Alt Signaling Port
+      - "1078:1078"   # JT1078 Video Media Port
+    environment:
+      - PORT=3000
+      - JT808_PORT=7788
+      - JT808_ALT_PORT=8088
+      - JT1078_PORT=1078

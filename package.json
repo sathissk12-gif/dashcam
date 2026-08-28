@@ -1,0 +1,15 @@
+{
+  "name": "dashcam-jt808-jt1078-project",
+  "version": "1.0.0",
+  "description": "JT/T 808 & JT/T 1078 Dashcam Live Streaming and GPS Tracking System",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "test": "node backend/test_system.js",
+    "sim": "node -e \"const Sim = require('./backend/src/simulator/dashcam_sim'); new Sim().start();\""
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}

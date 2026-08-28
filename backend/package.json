@@ -1,0 +1,15 @@
+{
+  "name": "dashcam-backend",
+  "version": "1.0.0",
+  "description": "JT/T 808 & JT/T 1078 Dashcam Backend Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test_system.js",
+    "sim": "node -e \"const Sim = require('./src/simulator/dashcam_sim'); new Sim().start();\""
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}
