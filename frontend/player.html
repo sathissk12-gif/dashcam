@@ -80,9 +80,11 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      background: rgba(15, 23, 42, 0.85);
+      background: rgba(15, 23, 42, 0.92);
       color: #fff;
       z-index: 20;
+      text-align: center;
+      padding: 20px;
       transition: opacity 0.3s ease;
     }
     .spinner {
@@ -98,14 +100,33 @@
       to { transform: rotate(360deg); }
     }
     .status-text {
-      font-size: 13px;
+      font-size: 14px;
       color: #e2e8f0;
-      font-weight: 500;
+      font-weight: 600;
+      max-width: 90%;
     }
     .sub-text {
-      font-size: 11px;
+      font-size: 12px;
       color: #94a3b8;
-      margin-top: 4px;
+      margin-top: 6px;
+      max-width: 90%;
+      line-height: 1.4;
+    }
+    .btn-test {
+      margin-top: 16px;
+      padding: 8px 16px;
+      background: #ea580c;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      pointer-events: auto;
+      box-shadow: 0 4px 12px rgba(234, 88, 12, 0.35);
+    }
+    .btn-test:active {
+      transform: scale(0.96);
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/jmuxer@2.0.5/dist/jmuxer.min.js"></script>
@@ -120,9 +141,12 @@
     </div>
 
     <div id="status-overlay">
-      <div class="spinner"></div>
+      <div id="spinner" class="spinner"></div>
       <div id="status-text" class="status-text">Connecting to Camera VPS...</div>
       <div id="sub-text" class="sub-text">Waiting for H.264 video feed</div>
+      <button id="btn-test-stream" class="btn-test" style="display:none;" onclick="startTestFeed()">
+        ▶ Start Test Video Feed
+      </button>
     </div>
   </div>
 
@@ -130,6 +154,7 @@
     const urlParams = new URLSearchParams(window.location.search);
     const simNo = urlParams.get('sim') || '015770054447';
     const channel = parseInt(urlParams.get('channel') || '1', 10);
+    const autoTest = urlParams.get('test') === 'true';
     
     const camBadge = document.getElementById('cam-badge');
     camBadge.innerText = channel === 1 ? 'CH 1 • FRONT' : 'CH 2 • CABIN';
@@ -137,6 +162,8 @@
     const statusOverlay = document.getElementById('status-overlay');
     const statusText = document.getElementById('status-text');
     const subText = document.getElementById('sub-text');
+    const spinner = document.getElementById('spinner');
+    const btnTest = document.getElementById('btn-test-stream');
     const videoElem = document.getElementById('player');
 
     let jmuxer = null;
@@ -160,6 +187,19 @@
       }
     }
 
+    function startTestFeed() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        statusText.innerText = 'Starting Test Video Stream...';
+        btnTest.style.display = 'none';
+        spinner.style.display = 'block';
+        ws.send(JSON.stringify({
+          action: 'start_test_stream',
+          simNo: simNo,
+          channel: channel
+        }));
+      }
+    }
+
     function connectWs() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -178,12 +218,16 @@
           channel: channel,
           streamType: 0
         }));
+
+        if (autoTest) {
+          startTestFeed();
+        }
       };
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
           frameCount++;
-          if (frameCount === 3) {
+          if (frameCount >= 2) {
             statusOverlay.style.opacity = '0';
             setTimeout(() => { statusOverlay.style.display = 'none'; }, 300);
             videoElem.play().catch(() => {});
@@ -198,6 +242,11 @@
             const msg = JSON.parse(event.data);
             if (msg.type === 'stream_started') {
               statusText.innerText = 'Handshake OK. Decoding Video...';
+            } else if (msg.type === 'error') {
+              spinner.style.display = 'none';
+              statusText.innerText = `Camera 4G Device Offline`;
+              subText.innerText = `Dashcam (SIM: ${simNo}) is not currently transmitting on Port 5023. Turn on vehicle ACC or run test feed.`;
+              btnTest.style.display = 'inline-block';
             }
           } catch (e) {}
         }
@@ -219,7 +268,6 @@
       initMuxer();
       connectWs();
 
-      // Ensure autoplay on Android
       document.body.addEventListener('click', () => {
         videoElem.play().catch(() => {});
       }, { once: true });

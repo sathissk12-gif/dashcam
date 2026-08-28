@@ -19,6 +19,7 @@ const JT808Server = require('./src/jt808/server');
 const JT1078Server = require('./src/jt1078/server');
 const DashcamSimulator = require('./src/simulator/dashcam_sim');
 const geocoder = require('./src/utils/geocoder');
+const { getSampleFrame } = require('./src/simulator/h264_sample');
 
 const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
 const ALT_HTTP_PORT = 8798;
@@ -323,7 +324,6 @@ app.get('/api/vehicles/:simNo/playback/records', (req, res) => {
   const channel = parseInt(req.query.channel || '1', 10);
   const now = new Date();
   
-  // Generate available hourly recording blocks for the selected day
   const records = [];
   const hours = [8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20];
   const datePrefix = req.query.startTime ? req.query.startTime.substring(0, 10) : now.toISOString().substring(0, 10);
@@ -339,7 +339,7 @@ app.get('/api/vehicles/:simNo/playback/records', (req, res) => {
       mediaType: 0,
       streamType: 1,
       storageType: 1,
-      fileSize: 154820000 // ~150 MB
+      fileSize: 154820000
     });
   });
 
@@ -351,7 +351,7 @@ app.get('/api/vehicles/:simNo/playback/records', (req, res) => {
 
 app.post('/api/vehicles/:simNo/playback/start', async (req, res) => {
   const { simNo } = req.params;
-  const { channel = 1, startTime, endTime, mode = 0, speed = 0 } = req.body;
+  const { channel = 1 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
 
   try {
@@ -360,7 +360,7 @@ app.post('/api/vehicles/:simNo/playback/start', async (req, res) => {
       tcpPort: DEFAULT_MEDIA_PORT,
       udpPort: 0,
       channel: parseInt(channel, 10),
-      dataType: 1, // Playback video stream
+      dataType: 1,
       streamType: 1
     });
 
@@ -531,6 +531,10 @@ wss.on('connection', (ws) => {
       console.error('[WebSocket] Invalid client message:', e.message);
     }
   });
+
+  ws.on('close', () => {
+    if (ws._testInterval) clearInterval(ws._testInterval);
+  });
 });
 
 async function handleWsClientMessage(clientWs, data) {
@@ -543,6 +547,21 @@ async function handleWsClientMessage(clientWs, data) {
     case 'get_devices':
       broadcastDeviceList();
       break;
+
+    case 'start_test_stream': {
+      console.log(`[Test Stream] Starting 25 FPS live H.264 stream for ${simNo}...`);
+      let frameIdx = 0;
+      if (clientWs._testInterval) clearInterval(clientWs._testInterval);
+      clientWs._testInterval = setInterval(() => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          const sample = getSampleFrame(frameIdx++);
+          clientWs.send(sample.data);
+        } else {
+          clearInterval(clientWs._testInterval);
+        }
+      }, 40);
+      break;
+    }
 
     case 'start_stream': {
       try {
@@ -609,6 +628,7 @@ async function handleWsClientMessage(clientWs, data) {
 
     case 'stop_stream': {
       try {
+        if (clientWs._testInterval) clearInterval(clientWs._testInterval);
         console.log(`[Command] Stopping Live Video for ${simNo}...`);
         const stopResult = targetServer.stopLiveVideo(simNo, parseInt(channel || 0, 10));
         clientWs.send(JSON.stringify({ type: 'stream_stopped', ...stopResult }));
