@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'dashcam-server',
+      name: 'dashcam-backend',
       script: 'server.js',
       instances: 1,
       autorestart: true,
@@ -10,10 +10,9 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: 9090,
-        JT808_PORT: 5023,
-        JT808_ALT1: 7788,
-        JT808_ALT2: 9901,
-        JT1078_PORT: 1078
+        JT808_PORT: 9901,
+        JT808_ALT_PORT: 9092,
+        JT1078_PORT: 9902
       }
     }
   ]

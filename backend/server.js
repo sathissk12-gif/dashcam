@@ -20,11 +20,10 @@ const JT808Server = require('./src/jt808/server');
 const JT1078Server = require('./src/jt1078/server');
 const DashcamSimulator = require('./src/simulator/dashcam_sim');
 
-const HTTP_PORT = parseInt(process.env.PORT || '3000', 10);
-const JT808_PORT = parseInt(process.env.JT808_PORT || '5023', 10);      // Primary (e.g. 5023)
-const JT808_ALT1_PORT = parseInt(process.env.JT808_ALT1 || '7788', 10);  // Alt 7788
-const JT808_ALT2_PORT = parseInt(process.env.JT808_ALT2 || '9901', 10);  // Alt 9901
-const JT1078_PORT = parseInt(process.env.JT1078_PORT || '1078', 10);    // Video Media (1078 / 5024 / 9902)
+const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
+const JT808_PORT = parseInt(process.env.JT808_PORT || '9901', 10);      // Primary Signaling (9901)
+const JT808_ALT_PORT = parseInt(process.env.JT808_ALT_PORT || '9092', 10); // Alt Signaling (9092)
+const JT1078_PORT = parseInt(process.env.JT1078_PORT || '9902', 10);    // Video Media (9902)
 let publicIp = process.env.PUBLIC_IP || null;
 
 function getLocalIp() {
@@ -69,8 +68,7 @@ app.get('/api/status', (req, res) => {
     serverIp: publicIp || localServerIp,
     localIp: localServerIp,
     jt808Port: JT808_PORT,
-    jt808Alt1Port: JT808_ALT1_PORT,
-    jt808Alt2Port: JT808_ALT2_PORT,
+    jt808AltPort: JT808_ALT_PORT,
     jt1078Port: JT1078_PORT,
     devicesCount: jt808Servers.reduce((acc, s) => acc + s.devices.size, 0)
   });
@@ -99,7 +97,7 @@ function broadcastBinary(binaryData) {
 }
 
 // 3. Initialize Protocol Servers (Multi-port listeners for max compatibility)
-const listeningPorts = Array.from(new Set([JT808_PORT, JT808_ALT1_PORT, JT808_ALT2_PORT]));
+const listeningPorts = Array.from(new Set([JT808_PORT, JT808_ALT_PORT]));
 const jt808Servers = listeningPorts.map(p => new JT808Server({ port: p }));
 const jt1078Server = new JT1078Server({ port: JT1078_PORT });
 
@@ -204,7 +202,6 @@ wss.on('connection', (ws) => {
 function handleWsClientMessage(clientWs, data) {
   const { action, simNo, channel = 1, streamType = 0, customIp } = data;
   
-  // Find which JT808 server has the connected device
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
   const videoMediaIp = customIp || publicIp || localServerIp;
 

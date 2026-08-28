@@ -24,7 +24,6 @@ jobs:
           script: |
             echo "🚀 Starting Automated Deployment on VPS..."
             
-            # Navigate to project directory (or clone if not present)
             PROJECT_DIR="${{ secrets.VPS_TARGET_DIR || '/root/dashcam-v1' }}"
             
             if [ ! -d "$PROJECT_DIR" ]; then
@@ -38,25 +37,14 @@ jobs:
             git reset --hard HEAD
             git pull origin main
             
-            # Install dependencies in backend if present
             if [ -d "backend" ]; then
               echo "📦 Installing backend dependencies..."
               cd backend && npm install --production && cd ..
             fi
             
-            # Restart service using PM2 or Docker
-            if command -v pm2 &> /dev/null; then
-              echo "🔄 Restarting application with PM2..."
-              pm2 restart ecosystem.config.js || pm2 restart all || pm2 start ecosystem.config.js
-              pm2 save
-            elif [ -f "docker-compose.yml" ] && command -v docker-compose &> /dev/null; then
-              echo "🐳 Restarting application with Docker Compose..."
-              docker-compose down
-              docker-compose up -d --build
-            else
-              echo "⚡ Running deploy script..."
-              chmod +x deploy.sh
-              ./deploy.sh
-            fi
+            # Restart specifically dashcam-backend
+            echo "🔄 Restarting dashcam-backend in PM2..."
+            pm2 restart dashcam-backend --update-env || pm2 start backend/ecosystem.config.js
+            pm2 save
             
-            echo "🎉 Deployment to VPS Completed Successfully!"
+            echo "🎉 Deployment Completed Successfully without duplicate processes!"
