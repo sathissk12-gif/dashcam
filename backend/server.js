@@ -130,6 +130,9 @@ function formatVehicleObj(v) {
     model: v.model || 'T98 NON-AI 4G Dual-Cam',
     driverName: v.driverName || '',
     driverPhone: v.driverPhone || '',
+    assignedUserId: v.assignedUserId || '',
+    assignedUserName: v.assignedUserName || '',
+    assignedUserPhone: v.assignedUserPhone || '',
     channelCount: v.channelCount || 2,
     channels: v.channels || [
       { id: 1, name: 'Channel 1 (Front Road)', enabled: true },
@@ -157,10 +160,17 @@ function formatVehicleObj(v) {
 
 // 2. Vehicles CRUD for Flutter App DashcamApiService
 app.get('/api/vehicles', (req, res) => {
-  const list = getDistinctVehicles().map(formatVehicleObj);
+  const { userId } = req.query;
+  let list = getDistinctVehicles();
+  if (userId) {
+    list = list.filter(v => 
+      v.assignedUserId === userId || 
+      (v.assignedUserName && v.assignedUserName.toLowerCase().includes(userId.toLowerCase()))
+    );
+  }
   res.json({
     success: true,
-    data: list
+    data: list.map(formatVehicleObj)
   });
 });
 
@@ -178,7 +188,19 @@ app.get('/api/vehicles/:id', (req, res) => {
 });
 
 app.post('/api/vehicles', (req, res) => {
-  const { numberPlate, simNo, model, driverName, driverPhone, channelCount, channels } = req.body;
+  const { 
+    numberPlate, 
+    simNo, 
+    model, 
+    driverName, 
+    driverPhone, 
+    assignedUserId, 
+    assignedUserName, 
+    assignedUserPhone, 
+    channelCount, 
+    channels 
+  } = req.body;
+
   if (!numberPlate || !simNo) {
     return res.status(400).json({ success: false, error: 'numberPlate and simNo are required' });
   }
@@ -194,6 +216,9 @@ app.post('/api/vehicles', (req, res) => {
     model: model || 'T98 NON-AI 4G Dual-Cam',
     driverName: driverName || '',
     driverPhone: driverPhone || '',
+    assignedUserId: assignedUserId || '',
+    assignedUserName: assignedUserName || '',
+    assignedUserPhone: assignedUserPhone || '',
     channelCount: channelCount || 2,
     channels: channels || [
       { id: 1, name: 'Channel 1 (Front Road)', enabled: true },
@@ -206,7 +231,7 @@ app.post('/api/vehicles', (req, res) => {
   dashcamVehicles[id] = newVehicle;
   saveVehicles(dashcamVehicles);
 
-  console.log(`[API] Created Dashcam Vehicle: ${cleanPlate} -> SIM: ${cleanSim}`);
+  console.log(`[API] Created Dashcam Vehicle: ${cleanPlate} -> SIM: ${cleanSim} (Assigned User: ${assignedUserName || 'None'})`);
 
   broadcastJson({
     type: 'vehicle_updated',
