@@ -23,6 +23,32 @@ const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
 const DEFAULT_MEDIA_PORT = 5023;
 let publicIp = process.env.PUBLIC_IP || null;
 
+// Vehicle to Camera Registry Storage
+const DATA_DIR = path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const LINKS_FILE = path.join(DATA_DIR, 'vehicle_links.json');
+
+function loadVehicleLinks() {
+  try {
+    if (fs.existsSync(LINKS_FILE)) {
+      return JSON.parse(fs.readFileSync(LINKS_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Error loading vehicle links:', e.message);
+  }
+  return {};
+}
+
+function saveVehicleLinks(links) {
+  try {
+    fs.writeFileSync(LINKS_FILE, JSON.stringify(links, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Error saving vehicle links:', e.message);
+  }
+}
+
+let vehicleLinks = loadVehicleLinks();
+
 function getLocalIp() {
   const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
@@ -55,17 +81,90 @@ async function detectPublicIp() {
 detectPublicIp();
 
 const app = express();
+app.use(express.json());
 const frontendDir = path.join(__dirname, '../frontend');
 app.use(express.static(frontendDir));
 
+// CORS for mobile app access
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
+// 1. Status API
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
     serverIp: publicIp || localServerIp,
     localIp: localServerIp,
     jt808Ports: activeJt808Ports,
-    devicesCount: jt808Servers.reduce((acc, s) => acc + s.devices.size, 0)
+    devicesCount: jt808Servers.reduce((acc, s) => acc + s.devices.size, 0),
+    linkedVehiclesCount: Object.keys(vehicleLinks).length
   });
+});
+
+// 2. Vehicle-Camera Link Registry APIs
+app.get('/api/vehicles/links', (req, res) => {
+  res.json({
+    success: true,
+    links: vehicleLinks
+  });
+});
+
+app.get('/api/vehicles/link/:vehicleId', (req, res) => {
+  const { vehicleId } = req.params;
+  const link = vehicleLinks[vehicleId] || Object.values(vehicleLinks).find(v => v.imei === vehicleId || v.plateNo === vehicleId);
+  if (link) {
+    res.json({ success: true, link });
+  } else {
+    res.status(404).json({ success: false, message: 'Vehicle camera link not found' });
+  }
+});
+
+app.post('/api/vehicles/link', (req, res) => {
+  const { vehicleId, plateNo, imei, cameraId, isCameraLicense = true, cameraChannel = 1 } = req.body;
+  if (!vehicleId || !cameraId) {
+    return res.status(400).json({ success: false, message: 'vehicleId and cameraId are required' });
+  }
+
+  vehicleLinks[vehicleId] = {
+    vehicleId,
+    plateNo: plateNo || vehicleId,
+    imei: imei || '',
+    cameraId: String(cameraId).trim(),
+    isCameraLicense: !!isCameraLicense,
+    cameraChannel: parseInt(cameraChannel, 10) || 1,
+    updatedAt: new Date().toISOString()
+  };
+
+  saveVehicleLinks(vehicleLinks);
+  console.log(`[Registry] Linked Vehicle ${vehicleId} (${plateNo || ''}) -> Camera SIM ${cameraId}`);
+
+  broadcastJson({
+    type: 'vehicle_link_updated',
+    link: vehicleLinks[vehicleId]
+  });
+
+  res.json({
+    success: true,
+    message: 'Vehicle camera link saved successfully',
+    link: vehicleLinks[vehicleId]
+  });
+});
+
+app.delete('/api/vehicles/link/:vehicleId', (req, res) => {
+  const { vehicleId } = req.params;
+  if (vehicleLinks[vehicleId]) {
+    delete vehicleLinks[vehicleId];
+    saveVehicleLinks(vehicleLinks);
+    console.log(`[Registry] Unlinked Vehicle ${vehicleId}`);
+    res.json({ success: true, message: 'Vehicle camera unlinked' });
+  } else {
+    res.status(404).json({ success: false, message: 'Link not found' });
+  }
 });
 
 const httpServer = http.createServer(app);
@@ -187,17 +286,23 @@ function broadcastDeviceList() {
       }
     });
   });
-  broadcastJson({ type: 'device_list', devices, serverIp: publicIp || localServerIp });
+  broadcastJson({
+    type: 'device_list',
+    devices,
+    serverIp: publicIp || localServerIp,
+    vehicleLinks
+  });
 }
 
 wss.on('connection', (ws) => {
-  console.log('[WebSocket] Web client connected.');
+  console.log('[WebSocket] Client connected.');
   broadcastDeviceList();
   ws.send(JSON.stringify({
     type: 'server_info',
     serverIp: publicIp || localServerIp,
     jt808Ports: activeJt808Ports,
-    defaultMediaPort: DEFAULT_MEDIA_PORT
+    defaultMediaPort: DEFAULT_MEDIA_PORT,
+    vehicleLinks
   }));
   ws.send(JSON.stringify({ type: 'sim_status', running: !!activeSimulator }));
 
@@ -220,6 +325,10 @@ async function handleWsClientMessage(clientWs, data) {
   switch (action) {
     case 'get_devices':
       broadcastDeviceList();
+      break;
+
+    case 'get_links':
+      clientWs.send(JSON.stringify({ type: 'vehicle_links', links: vehicleLinks }));
       break;
 
     case 'start_stream': {
@@ -267,7 +376,7 @@ async function handleWsClientMessage(clientWs, data) {
           tcpPort: videoMediaPort,
           udpPort: 0,
           channel: parseInt(channel, 10),
-          dataType: 2, // 2: Two-way Talkback Intercom (双向对讲)
+          dataType: 2, // 2: Two-way Talkback Intercom
           streamType: 1
         });
 
@@ -347,7 +456,7 @@ async function startAll() {
   }
 
   httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
-    console.log(`🚀 Web Dashboard available at http://0.0.0.0:${HTTP_PORT}`);
+    console.log(`🚀 Web Dashboard & API available at http://0.0.0.0:${HTTP_PORT}`);
     console.log(`🌐 Server IP for Dashcam: ${publicIp || localServerIp}`);
   });
 }
