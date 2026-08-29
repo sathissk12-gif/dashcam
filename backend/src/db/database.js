@@ -54,7 +54,7 @@ const stmts = {
   `),
   deleteVehicle: db.prepare('DELETE FROM vehicles WHERE id = ? OR sim_no = ?'),
 
-  // GPS History
+  // GPS History (Composite timestamp + id cursor support)
   insertGpsPoint: db.prepare(`
     INSERT INTO gps_history (
       sim_no, latitude, longitude, speed_kmh, direction, altitude,
@@ -64,10 +64,16 @@ const stmts = {
       @acc_on, @address, @satellites, @signal_strength, @timestamp
     )
   `),
-  getGpsHistory: db.prepare(`
+  getGpsHistoryInitial: db.prepare(`
     SELECT * FROM gps_history
     WHERE sim_no = ? AND timestamp >= ? AND timestamp <= ?
-    ORDER BY timestamp ASC
+    ORDER BY timestamp ASC, id ASC
+    LIMIT ?
+  `),
+  getGpsHistoryWithCursor: db.prepare(`
+    SELECT * FROM gps_history
+    WHERE sim_no = ? AND (timestamp > ? OR (timestamp = ? AND id > ?)) AND timestamp <= ?
+    ORDER BY timestamp ASC, id ASC
     LIMIT ?
   `),
   getLatestGpsPoint: db.prepare(`

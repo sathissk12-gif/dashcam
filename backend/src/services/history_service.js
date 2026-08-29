@@ -12,6 +12,22 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+function encodeCursor(timestamp, id) {
+  return Buffer.from(`${timestamp}|${id}`).toString('base64');
+}
+
+function decodeCursor(cursorStr) {
+  try {
+    const raw = Buffer.from(cursorStr, 'base64').toString('utf8');
+    const [timestamp, idStr] = raw.split('|');
+    const id = parseInt(idStr, 10);
+    if (timestamp && !isNaN(id)) {
+      return { timestamp, id };
+    }
+  } catch (e) {}
+  return null;
+}
+
 class HistoryService {
   isValidCoordinate(lat, lng) {
     if (lat === 0.0 && lng === 0.0) return false;
@@ -29,7 +45,6 @@ class HistoryService {
     const lat = parseFloat(data.latitude);
     const lng = parseFloat(data.longitude);
 
-    // 1. Filter invalid / un-fixed GPS
     if (!this.isValidCoordinate(lat, lng)) {
       return;
     }
@@ -52,18 +67,25 @@ class HistoryService {
         timestamp: data.time || new Date().toISOString()
       });
     } catch (err) {
-      // Ignored if vehicle does not exist yet due to foreign key
+      // Vehicle foreign key mismatch ignored
     }
   }
 
-  getHistory(simNo, startTime, endTime, limit = 5000, cursor = null) {
+  getHistory(simNo, startTime, endTime, limit = 500, cursor = null) {
     const start = startTime || new Date(Date.now() - 86400000).toISOString();
     const end = endTime || new Date().toISOString();
     const cleanLimit = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 5000);
 
-    const rows = stmts.getGpsHistory.all(simNo, cursor || start, end, cleanLimit);
+    let rows = [];
+    const parsedCursor = cursor ? decodeCursor(cursor) : null;
 
-    return rows.map(r => ({
+    if (parsedCursor) {
+      rows = stmts.getGpsHistoryWithCursor.all(simNo, parsedCursor.timestamp, parsedCursor.timestamp, parsedCursor.id, end, cleanLimit);
+    } else {
+      rows = stmts.getGpsHistoryInitial.all(simNo, start, end, cleanLimit);
+    }
+
+    const data = rows.map(r => ({
       id: r.id,
       simNo: r.sim_no,
       latitude: r.latitude,
@@ -77,10 +99,23 @@ class HistoryService {
       signal: r.signal_strength,
       timestamp: r.timestamp
     }));
+
+    let nextCursor = null;
+    if (rows.length === cleanLimit) {
+      const last = rows[rows.length - 1];
+      nextCursor = encodeCursor(last.timestamp, last.id);
+    }
+
+    return {
+      data,
+      count: data.length,
+      nextCursor
+    };
   }
 
   getTripSummary(simNo, startTime, endTime) {
-    const points = this.getHistory(simNo, startTime, endTime, 5000);
+    const historyResult = this.getHistory(simNo, startTime, endTime, 5000);
+    const points = historyResult.data;
     if (points.length === 0) {
       return {
         totalPoints: 0,
@@ -112,7 +147,6 @@ class HistoryService {
         const distKm = calculateDistanceKm(prev.latitude, prev.longitude, p.latitude, p.longitude);
         const timeDiffSec = (new Date(p.timestamp).getTime() - new Date(prev.timestamp).getTime()) / 1000;
 
-        // GPS Jump Sanity Filter: if speed implied by jump > 180 km/h, skip jump distance
         if (timeDiffSec > 0) {
           const impliedSpeedKmh = (distKm / timeDiffSec) * 3600;
           if (impliedSpeedKmh <= 180) {

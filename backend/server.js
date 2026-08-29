@@ -345,8 +345,8 @@ app.get('/api/history/:simNo', authMiddleware, verifyVehicleAccess('simNo'), rat
   const { simNo } = req.params;
   const { startTime, endTime, limit, cursor } = req.query;
 
-  const points = historyService.getHistory(simNo, startTime, endTime, limit, cursor);
-  res.json({ success: true, count: points.length, data: points });
+  const result = historyService.getHistory(simNo, startTime, endTime, limit, cursor);
+  res.json({ success: true, count: result.count, nextCursor: result.nextCursor, data: result.data });
 });
 
 app.get('/api/history/:simNo/summary', authMiddleware, verifyVehicleAccess('simNo'), (req, res) => {
