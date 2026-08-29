@@ -171,15 +171,30 @@ class JT808Server extends EventEmitter {
     });
   }
 
+  getDevice(simNo) {
+    if (!simNo) return null;
+    const direct = this.devices.get(simNo);
+    if (direct) return direct;
+    const clean = String(simNo).replace(/\D/g, '');
+    for (const [key, dev] of this.devices.entries()) {
+      const cleanKey = String(key).replace(/\D/g, '');
+      if (cleanKey === clean || cleanKey.endsWith(clean) || clean.endsWith(cleanKey)) {
+        return dev;
+      }
+    }
+    return null;
+  }
+
   handleJt1078Packet(packet, meta) {
     const simNo = bcdToString(packet.subarray(4, 10));
-    const channel = packet[14];
+    const rawChannel = packet[14];
+    const channel = (rawChannel === 64 || rawChannel === 0) ? 1 : ((rawChannel === 65) ? 2 : rawChannel);
     const seqNo = packet.readUInt16BE(10);
     const streamKey = `${simNo}_${channel}`;
     const payload = packet.subarray(meta.headerLen);
 
     // Update device lastSeen on media packets too
-    const device = this.devices.get(simNo);
+    const device = this.getDevice(simNo);
     if (device) {
       device.lastSeen = new Date();
       device.online = true;
@@ -411,7 +426,7 @@ class JT808Server extends EventEmitter {
 
   // 1. Query Real SD Card Records (0x9205)
   querySdRecordings(simNo, options = {}) {
-    const device = this.devices.get(simNo);
+    const device = this.getDevice(simNo);
     if (!device || !device.socket || !device.online) {
       const err = new Error(`Device ${simNo} is currently offline. Cannot query physical SD card.`);
       err.code = 'DEVICE_OFFLINE';
@@ -443,7 +458,7 @@ class JT808Server extends EventEmitter {
 
   // 2. Request Real SD Card Playback Stream (0x9201)
   requestPlaybackStream(simNo, options = {}) {
-    const device = this.devices.get(simNo);
+    const device = this.getDevice(simNo);
     if (!device || !device.socket || !device.online) {
       const err = new Error(`Device ${simNo} is currently offline`);
       err.code = 'DEVICE_OFFLINE';
@@ -460,7 +475,7 @@ class JT808Server extends EventEmitter {
   }
 
   disableSleepMode(simNo) {
-    const device = this.devices.get(simNo);
+    const device = this.getDevice(simNo);
     if (!device || !device.socket || !device.online) return;
 
     const body = Buffer.alloc(1 + 4 + 1 + 4);
@@ -475,7 +490,7 @@ class JT808Server extends EventEmitter {
   }
 
   requestLiveVideo(simNo, options = {}) {
-    const device = this.devices.get(simNo);
+    const device = this.getDevice(simNo);
     if (!device || !device.socket || !device.online) {
       throw new Error(`Device ${simNo} is not online`);
     }
@@ -512,7 +527,7 @@ class JT808Server extends EventEmitter {
   }
 
   sendAudioFrame(simNo, pcmBuffer, channel = 1) {
-    const device = this.devices.get(simNo);
+    const device = this.getDevice(simNo);
     if (!device || !device.socket || !device.online) return false;
 
     try {
@@ -533,7 +548,7 @@ class JT808Server extends EventEmitter {
   }
 
   stopLiveVideo(simNo, channel = 0) {
-    const device = this.devices.get(simNo);
+    const device = this.getDevice(simNo);
     if (!device || !device.socket || !device.online) return { success: false };
 
     const body = Buffer.alloc(4);

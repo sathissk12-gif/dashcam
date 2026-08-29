@@ -645,9 +645,11 @@ function setupJT808Handlers(serverInstance, portName) {
   });
 
   serverInstance.on('video_frame', (frame) => {
+    const frameSim = normalizeSim(frame.simNo);
     wss.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
-        const matchesSim = !client.subscribedSim || client.subscribedSim === frame.simNo;
+        const clientSim = client.subscribedSim ? normalizeSim(resolveSim(client.subscribedSim)) : null;
+        const matchesSim = !clientSim || clientSim === frameSim || client.subscribedSim === frame.simNo;
         const matchesChannel = !client.subscribedChannel || client.subscribedChannel === frame.channel;
         if (matchesSim && matchesChannel) {
           client.send(frame.data);
@@ -810,7 +812,8 @@ wss.on('connection', (ws, req) => {
 
 async function handleWsClientMessage(clientWs, data) {
   const { action, simNo, channel = 1, streamType = 1, customIp, mediaPort, audioData } = data;
-  const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
+  const targetSim = resolveSim(simNo) || simNo;
+  const targetServer = jt808Servers.find(s => (s.getDevice && s.getDevice(targetSim)) || s.devices.has(simNo)) || jt808Servers[0];
   const videoMediaIp = customIp || publicIp || localServerIp;
   const videoMediaPort = parseInt(mediaPort || DEFAULT_MEDIA_PORT, 10);
 
