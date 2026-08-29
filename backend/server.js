@@ -85,11 +85,13 @@ app.use(express.static(frontendDir));
 // Strict Origin Matching Middleware
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin);
-  } else if (!origin && ALLOWED_ORIGINS.includes('http://localhost:3000')) {
-    // Non-browser or direct curl
-    res.header('Access-Control-Allow-Origin', ALLOWED_ORIGINS[0]);
+  if (origin) {
+    if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.traxengps.in') || origin.endsWith('traxengps.in')) {
+      res.header('Access-Control-Allow-Origin', origin);
+      res.header('Access-Control-Allow-Credentials', 'true');
+    }
+  } else {
+    res.header('Access-Control-Allow-Origin', '*');
   }
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-API-Key');
