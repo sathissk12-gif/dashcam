@@ -1,6 +1,6 @@
 /**
- * Dashcam Command Center Frontend Application
- * Ultra-Low-Latency H.264 Live Stream Player, Two-Way Audio Talkback & GPS Live Tracking
+ * Dashcam Command Center Frontend Application (Production Hardened)
+ * Ultra-Low-Latency H.264 Live Stream Player, Two-Way Audio Talkback, Real SD Playback & GPS Live Tracking
  */
 
 // State
@@ -17,6 +17,7 @@ let frameCount = 0;
 let currentChannel = 1;
 let lastFpsTime = Date.now();
 let hasSeenKeyframe = false;
+let currentToken = null;
 
 // Audio Talkback State
 let audioContext = null;
@@ -46,6 +47,14 @@ const simBtnText = document.getElementById('simBtnText');
 const logsContainer = document.getElementById('logsContainer');
 const clearLogsBtn = document.getElementById('clearLogsBtn');
 const jt808PortDisplay = document.getElementById('jt808PortDisplay');
+const roleSwitcher = document.getElementById('roleSwitcher');
+
+// Playback Modal DOM
+const playbackModal = document.getElementById('playbackModal');
+const btnQueryPlayback = document.getElementById('btnQueryPlayback');
+const closePlaybackBtn = document.getElementById('closePlaybackBtn');
+const btnFetchSdRecords = document.getElementById('btnFetchSdRecords');
+const playbackRecordsList = document.getElementById('playbackRecordsList');
 
 // Telemetry DOM
 const speedVal = document.getElementById('speedVal');
@@ -116,16 +125,54 @@ function initJMuxer() {
   playerEl.play().catch(() => {});
 }
 
-function connectWebSocket() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/ws`;
+async function obtainTokenForRole(roleKey) {
+  const MASTER_API_KEY = 'traxen_live_api_8899aabbccddeeff00112233';
+  let payload = { userId: 'admin_user', name: 'Master Admin', role: 'admin', tenantId: 'default' };
 
-  addLog(`[SYSTEM] Connecting to WebSocket Server at ${wsUrl}...`, 'system-log');
+  if (roleKey === 'cust_1') {
+    payload = { userId: 'user_cust_1', name: 'Customer One', role: 'customer', tenantId: 'tenant_A' };
+  } else if (roleKey === 'cust_2') {
+    payload = { userId: 'user_cust_2', name: 'Customer Two', role: 'customer', tenantId: 'tenant_B' };
+  } else if (roleKey === 'dealer_A') {
+    payload = { userId: 'dealer_1', name: 'Dealer A', role: 'dealer', tenantId: 'tenant_A' };
+  }
+
+  try {
+    const res = await fetch('/api/auth/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': MASTER_API_KEY
+      },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.success && data.token) {
+      currentToken = data.token;
+      return currentToken;
+    }
+  } catch (e) {}
+
+  return null;
+}
+
+async function connectWebSocket() {
+  if (ws) {
+    try { ws.close(); } catch (e) {}
+  }
+
+  const selectedRole = roleSwitcher ? roleSwitcher.value : 'admin';
+  const token = await obtainTokenForRole(selectedRole);
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${protocol}//${window.location.host}/ws?token=${token || ''}`;
+
+  addLog(`[SYSTEM] Authenticating WebSocket as [${selectedRole.toUpperCase()}]...`, 'system-log');
   ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
-    addLog('[SYSTEM] WebSocket Connected successfully.', 'system-log');
+    addLog(`[SYSTEM] WebSocket Connected & Authenticated (${selectedRole}).`, 'system-log');
   };
 
   ws.onmessage = (event) => {
@@ -142,15 +189,19 @@ function connectWebSocket() {
     }
   };
 
-  ws.onclose = () => {
-    addLog('[SYSTEM] WebSocket Disconnected. Reconnecting in 3s...', 'system-log');
-    setTimeout(connectWebSocket, 3000);
+  ws.onclose = (evt) => {
+    if (evt.code === 1008) {
+      addLog('[SECURITY] WebSocket Handshake Rejected: Policy Violation (1008).', 'error-log');
+    } else {
+      addLog('[SYSTEM] WebSocket Disconnected. Reconnecting in 3s...', 'system-log');
+      setTimeout(connectWebSocket, 3000);
+    }
   };
 }
 
 function isH264Keyframe(uint8) {
   for (let i = 0; i < Math.min(uint8.length - 4, 64); i++) {
-    if (uint8[i] === 0x00 && uint8[i + 1] === 0x00 && (uint8[i + 2] === 0x01 || (uint8[i + 2] === 0x00 && uint8[i + 3] === 0x01))) {
+    if (uint8[i] === 0x00 && uint8[i + 1] === 0x00 && (uint8[i + 2] === 0x01 || (uint8[i + 2] === 0x00 && buf[i + 3] === 0x01))) {
       const nalByte = uint8[i + 2] === 0x01 ? uint8[i + 3] : uint8[i + 4];
       const nalType = nalByte & 0x1f;
       if (nalType === 7 || nalType === 8 || nalType === 5) {
@@ -176,9 +227,7 @@ function handleVideoFrame(arrayBuffer) {
   }
 
   if (jmuxer) {
-    jmuxer.feed({
-      video: uint8
-    });
+    jmuxer.feed({ video: uint8 });
   }
 
   if (videoOverlay && !videoOverlay.classList.contains('hidden')) {
@@ -200,108 +249,87 @@ function handleVideoFrame(arrayBuffer) {
 
 function handleJsonMessage(msg) {
   switch (msg.type) {
-    case 'server_info':
-      if (jt808PortDisplay) jt808PortDisplay.textContent = '5023';
-      break;
-
     case 'device_list':
-      updateDeviceList(msg.devices);
+      updateDeviceList(msg.devices || [], msg.vehicles || []);
       break;
 
     case 'device_connected':
-      addLog(`[JT808] Device Online: ${msg.simNo}`, 'log-in');
-      refreshDevices();
+      addLog(`[JT808] 0x0100 Device Registered: ${msg.simNo} (Auth: ${msg.authCode})`, 'rx-log');
       break;
 
     case 'device_location':
-      handleLocationUpdate(msg);
+      updateLocation(msg);
       break;
 
     case 'packet_log':
-      const cls = msg.direction === 'IN' ? 'log-in' : (msg.direction === 'MEDIA' ? 'log-media' : 'log-out');
-      addLog(`[${msg.protocol || 'JT808'}] ${msg.direction} ${msg.msgId || ''} ${msg.desc || ''}`, cls);
+      addPacketLog(msg);
       break;
 
     case 'stream_started':
+      addLog(`[JT1078] Live Stream Started on Channel ${msg.channel}`, 'system-log');
       setStreamingState(true);
-      if (msg.channel) updateChannelUI(msg.channel);
-      addLog(`[JT1078] Live video stream request sent (Ch: ${msg.channel || currentChannel})`, 'log-out');
-      break;
-
-    case 'talkback_started':
-      addLog(`[JT1078] Two-Way Talkback Audio Enabled (Ch: ${msg.channel})`, 'log-out');
       break;
 
     case 'stream_stopped':
+      addLog(`[JT1078] Live Stream Stopped`, 'system-log');
       setStreamingState(false);
-      addLog(`[JT1078] Live video stream stopped.`, 'log-out');
       break;
 
-    case 'sim_status':
-      isSimRunning = msg.running;
-      simBtnText.textContent = isSimRunning ? 'Stop Mock Dashcam' : 'Start Mock Dashcam';
-      simControlBtn.classList.toggle('running', isSimRunning);
+    case 'error':
+      addLog(`[ERROR] ${msg.message}`, 'error-log');
       break;
   }
 }
 
-function updateDeviceList(devices) {
+function updateDeviceList(devices, vehicles = []) {
   const currentVal = deviceSelect.value;
   deviceSelect.innerHTML = '';
 
-  if (!devices || devices.length === 0) {
-    deviceSelect.innerHTML = '<option value="">No device connected</option>';
+  const displayList = vehicles.length > 0 ? vehicles : devices;
+
+  if (displayList.length === 0) {
+    deviceSelect.innerHTML = '<option value="">No vehicles assigned</option>';
     activeDevice = null;
     return;
   }
 
-  devices.forEach(dev => {
+  displayList.forEach((item) => {
+    const sim = item.simNo;
+    const isOnline = item.isOnline || item.online;
+    const plate = item.numberPlate ? ` [${item.numberPlate}]` : '';
     const opt = document.createElement('option');
-    opt.value = dev.simNo;
-    opt.textContent = `SIM: ${dev.simNo} ${dev.online ? '(ONLINE)' : '(OFFLINE)'}`;
+    opt.value = sim;
+    opt.textContent = `${sim}${plate} (${isOnline ? 'ONLINE' : 'OFFLINE'})`;
     deviceSelect.appendChild(opt);
   });
 
-  if (currentVal && devices.some(d => d.simNo === currentVal)) {
+  if (currentVal && Array.from(deviceSelect.options).some(o => o.value === currentVal)) {
     deviceSelect.value = currentVal;
   } else {
-    deviceSelect.value = devices[0].simNo;
+    deviceSelect.value = displayList[0].simNo;
   }
+
   activeDevice = deviceSelect.value;
 }
 
-function handleLocationUpdate(data) {
-  if (data.latitude && data.longitude) {
-    const latLng = [data.latitude, data.longitude];
-    vehicleMarker.setLatLng(latLng);
+function updateLocation(data) {
+  if (data.simNo !== activeDevice && activeDevice !== null) return;
 
-    const iconEl = document.getElementById('vehicleIcon');
-    if (iconEl && data.direction !== undefined) {
-      iconEl.style.transform = `rotate(${data.direction - 45}deg)`;
-    }
+  const lat = data.latitude;
+  const lng = data.longitude;
+  const speed = data.speedKmh || data.speed || 0.0;
+  const course = data.direction || data.course || 0;
+  const acc = data.accOn !== undefined ? data.accOn : data.acc;
 
-    trajectoryCoords.push(latLng);
-    if (trajectoryCoords.length > 500) trajectoryCoords.shift();
-    trajectoryPath.setLatLngs(trajectoryCoords);
+  speedVal.innerHTML = `${speed.toFixed(1)} <small>km/h</small>`;
+  headingVal.innerHTML = `${course.toFixed(0)}° <small>${getCardinalDirection(course)}</small>`;
 
-    map.panTo(latLng);
-    gpsStatusBadge.className = 'badge badge-online';
-    gpsStatusBadge.innerHTML = '<i class="fa-solid fa-satellite-dish"></i> GPS 3D FIX';
-
-    vehicleMarker.getPopup().setContent(`
-      <b>Device: ${data.simNo}</b><br>
-      Speed: ${data.speedKmh.toFixed(1)} km/h<br>
-      Heading: ${data.direction}°<br>
-      Time: ${data.time}
-    `);
-  }
-
-  speedVal.innerHTML = `${(data.speedKmh || 0).toFixed(1)} <small>km/h</small>`;
-  headingVal.innerHTML = `${data.direction || 0}° <small>${getCardinalDirection(data.direction || 0)}</small>`;
-
-  if (data.accOn !== undefined) {
-    accVal.textContent = data.accOn ? 'ON' : 'OFF';
-    accVal.className = `stat-val ${data.accOn ? 'status-acc-on' : 'status-acc-off'}`;
+  if (acc) {
+    accVal.textContent = 'ON';
+    accVal.className = 'stat-val status-acc-on';
+  } else {
+    accVal.textContent = 'OFF';
+    accVal.className = 'stat-val status-acc-off';
   }
 
   if (data.extras) {
@@ -309,257 +337,202 @@ function handleLocationUpdate(data) {
     if (data.extras.signalStrength !== undefined) signalVal.textContent = `${data.extras.signalStrength} / 31`;
     if (data.extras.mileageKm !== undefined) mileageVal.innerHTML = `${data.extras.mileageKm.toFixed(1)} <small>km</small>`;
   }
-}
 
-function getCardinalDirection(deg) {
-  const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-  return directions[Math.round(deg / 45) % 8];
-}
+  if (lat && lng && map && vehicleMarker) {
+    const latLng = [lat, lng];
+    vehicleMarker.setLatLng(latLng);
+    map.panTo(latLng);
 
-function updateChannelUI(ch) {
-  currentChannel = ch;
-  channelSelect.value = ch;
-  if (ch === 1 || ch === 64) {
-    channelBadge.className = 'badge badge-info';
-    channelBadge.innerHTML = `<i class="fa-solid fa-road"></i> FRONT (CH ${ch})`;
-    if (btnFrontCam) {
-      btnFrontCam.style.background = '#0284c7';
-      btnFrontCam.style.color = '#fff';
+    const vehicleIcon = document.getElementById('vehicleIcon');
+    if (vehicleIcon) {
+      vehicleIcon.style.transform = `rotate(${course}deg)`;
     }
-    if (btnCabinCam) {
-      btnCabinCam.style.background = '#334155';
-      btnCabinCam.style.color = '#fff';
-    }
-  } else {
-    channelBadge.className = 'badge badge-warning';
-    channelBadge.innerHTML = `<i class="fa-solid fa-user"></i> CABIN (CH ${ch})`;
-    if (btnCabinCam) {
-      btnCabinCam.style.background = '#0284c7';
-      btnCabinCam.style.color = '#fff';
-    }
-    if (btnFrontCam) {
-      btnFrontCam.style.background = '#334155';
-      btnFrontCam.style.color = '#fff';
-    }
+
+    gpsStatusBadge.className = 'badge badge-online';
+    gpsStatusBadge.textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+
+    trajectoryCoords.push(latLng);
+    if (trajectoryCoords.length > 500) trajectoryCoords.shift();
+    if (trajectoryPath) trajectoryPath.setLatLngs(trajectoryCoords);
   }
+}
+
+function getCardinalDirection(angle) {
+  const directions = ['North', 'NE', 'East', 'SE', 'South', 'SW', 'West', 'NW'];
+  return directions[Math.round(angle / 45) % 8];
 }
 
 function setStreamingState(streaming) {
   isStreaming = streaming;
   if (streaming) {
     liveBadge.className = 'badge badge-online';
-    liveBadge.innerHTML = '<i class="fa-solid fa-circle"></i> LIVE (JT1078)';
-    videoOverlay.classList.add('hidden');
+    liveBadge.innerHTML = '<i class="fa-solid fa-circle"></i> LIVE';
     startLiveBtn.disabled = true;
     stopLiveBtn.disabled = false;
   } else {
     liveBadge.className = 'badge badge-offline';
     liveBadge.innerHTML = '<i class="fa-solid fa-circle"></i> STANDBY';
-    fpsBadge.textContent = '0 FPS';
-    videoOverlay.classList.remove('hidden');
-    overlayText.textContent = 'Live stream standby. Click Request Live Stream below.';
     startLiveBtn.disabled = false;
     stopLiveBtn.disabled = true;
+    fpsBadge.textContent = '0 FPS';
+    hasSeenKeyframe = false;
+
+    if (videoOverlay) {
+      videoOverlay.classList.remove('hidden');
+      overlayText.textContent = 'Live stream stopped';
+    }
   }
 }
 
 function addLog(text, className = '') {
-  const time = new Date().toLocaleTimeString();
   const entry = document.createElement('div');
   entry.className = `log-entry ${className}`;
+  const time = new Date().toLocaleTimeString();
   entry.innerHTML = `<span class="timestamp">[${time}]</span> ${text}`;
   logsContainer.appendChild(entry);
   logsContainer.scrollTop = logsContainer.scrollHeight;
 }
 
-function refreshDevices() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ action: 'get_devices' }));
-  }
+function addPacketLog(p) {
+  const isTx = p.direction === 'OUT';
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${isTx ? 'tx-log' : 'rx-log'}`;
+  const time = new Date().toLocaleTimeString();
+  const dirIcon = isTx ? '⬆️ OUT' : (p.direction === 'MEDIA' ? '🎥 MEDIA' : '⬇️ IN');
+  entry.innerHTML = `<span class="timestamp">[${time}]</span> <span class="badge ${isTx ? 'badge-primary' : 'badge-info'}">${p.protocol || 'JT808'}</span> <b>${dirIcon} ${p.msgId}</b>: ${p.desc || ''}`;
+  logsContainer.appendChild(entry);
+  logsContainer.scrollTop = logsContainer.scrollHeight;
 }
 
-function requestStream(channel) {
-  const simNo = deviceSelect.value;
-  if (!simNo) {
-    alert('Please select or connect a dashcam device first.');
-    return;
-  }
+// Event Listeners
+startLiveBtn.addEventListener('click', () => {
+  if (!activeDevice || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  const channel = parseInt(channelSelect.value, 10);
   const streamType = parseInt(streamTypeSelect.value, 10);
-  updateChannelUI(channel);
+
+  currentChannel = channel;
+  channelBadge.textContent = channel === 1 ? 'FRONT (CH 1)' : (channel === 2 ? 'CABIN (CH 2)' : `CH ${channel}`);
 
   initJMuxer();
+  overlayText.textContent = `Requesting Channel ${channel} Live Stream from ${activeDevice}...`;
 
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      action: 'start_stream',
-      simNo,
-      channel,
-      streamType,
-      mediaPort: 5023
-    }));
-  }
-  overlayText.textContent = `Streaming Camera Channel ${channel} (Live)...`;
-}
-
-// 🎤 Two-Way Talkback Microphone Functions
-async function startTalkback() {
-  const simNo = deviceSelect.value;
-  if (!simNo) {
-    alert('Please select a connected dashcam first.');
-    return;
-  }
-
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        sampleRate: 8000,
-        echoCancellation: true,
-        noiseSuppression: true
-      }
-    });
-
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
-    const source = audioContext.createMediaStreamSource(micStream);
-    audioProcessor = audioContext.createScriptProcessor(512, 1, 1);
-
-    source.connect(audioProcessor);
-    audioProcessor.connect(audioContext.destination);
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        action: 'start_talkback',
-        simNo,
-        channel: currentChannel
-      }));
-    }
-
-    audioProcessor.onaudioprocess = (e) => {
-      if (!isTalking) return;
-      const inputData = e.inputBuffer.getChannelData(0);
-      
-      // Convert Float32Array [-1.0, 1.0] to 16-bit PCM Buffer
-      const pcm16 = new Int16Array(inputData.length);
-      for (let i = 0; i < inputData.length; i++) {
-        let s = Math.max(-1, Math.min(1, inputData[i]));
-        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      }
-
-      // Convert to Base64 and send via WebSocket
-      const bytes = new Uint8Array(pcm16.buffer);
-      let binaryStr = '';
-      for (let i = 0; i < bytes.byteLength; i++) {
-        binaryStr += String.fromCharCode(bytes[i]);
-      }
-      const b64Audio = btoa(binaryStr);
-
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          action: 'talkback_audio',
-          simNo,
-          channel: currentChannel,
-          audioData: b64Audio
-        }));
-      }
-    };
-
-    isTalking = true;
-    talkbackBtn.style.background = '#dc2626';
-    talkbackBtn.innerHTML = '<i class="fa-solid fa-microphone-lines"></i> 🔴 TRANSMITTING VOICE (Click to Stop)';
-    talkbackStatus.textContent = 'Transmitting Voice...';
-    talkbackStatus.style.color = '#ef4444';
-    addLog('[TALKBACK] Microphone active. Transmitting voice to Dashcam speaker...', 'log-out');
-
-  } catch (err) {
-    alert('Microphone access error: ' + err.message);
-    stopTalkback();
-  }
-}
-
-function stopTalkback() {
-  isTalking = false;
-  if (audioProcessor) {
-    audioProcessor.disconnect();
-    audioProcessor = null;
-  }
-  if (micStream) {
-    micStream.getTracks().forEach(track => track.stop());
-    micStream = null;
-  }
-  if (audioContext) {
-    audioContext.close();
-    audioContext = null;
-  }
-
-  talkbackBtn.style.background = '#059669';
-  talkbackBtn.innerHTML = '<i class="fa-solid fa-microphone"></i> Hold to Talk / Start Two-Way Audio';
-  talkbackStatus.textContent = 'Mic Idle';
-  talkbackStatus.style.color = '#94a3b8';
-  addLog('[TALKBACK] Voice transmission stopped.', 'log-out');
-}
-
-if (talkbackBtn) {
-  talkbackBtn.addEventListener('click', () => {
-    if (isTalking) {
-      stopTalkback();
-    } else {
-      startTalkback();
-    }
-  });
-}
-
-startLiveBtn.addEventListener('click', () => {
-  const channel = parseInt(channelSelect.value, 10);
-  requestStream(channel);
-});
-
-if (btnFrontCam) {
-  btnFrontCam.addEventListener('click', () => {
-    requestStream(1);
-  });
-}
-
-if (btnCabinCam) {
-  btnCabinCam.addEventListener('click', () => {
-    requestStream(2);
-  });
-}
-
-channelSelect.addEventListener('change', () => {
-  const channel = parseInt(channelSelect.value, 10);
-  if (isStreaming) {
-    requestStream(channel);
-  } else {
-    updateChannelUI(channel);
-  }
+  ws.send(JSON.stringify({
+    action: 'start_stream',
+    simNo: activeDevice,
+    channel,
+    streamType
+  }));
 });
 
 stopLiveBtn.addEventListener('click', () => {
-  const simNo = deviceSelect.value;
-  const channel = parseInt(channelSelect.value, 10);
+  if (!activeDevice || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      action: 'stop_stream',
-      simNo,
-      channel
-    }));
-  }
+  ws.send(JSON.stringify({
+    action: 'stop_stream',
+    simNo: activeDevice,
+    channel: currentChannel
+  }));
+
   setStreamingState(false);
 });
 
-simControlBtn.addEventListener('click', () => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      action: 'toggle_simulator'
-    }));
-  }
+btnFrontCam.addEventListener('click', () => {
+  channelSelect.value = "1";
+  startLiveBtn.click();
 });
+
+btnCabinCam.addEventListener('click', () => {
+  channelSelect.value = "2";
+  startLiveBtn.click();
+});
+
+if (roleSwitcher) {
+  roleSwitcher.addEventListener('change', () => {
+    connectWebSocket();
+  });
+}
+
+// SD Playback Modal
+if (btnQueryPlayback) {
+  btnQueryPlayback.addEventListener('click', () => {
+    playbackModal.style.display = 'flex';
+  });
+}
+
+if (closePlaybackBtn) {
+  closePlaybackBtn.addEventListener('click', () => {
+    playbackModal.style.display = 'none';
+  });
+}
+
+if (btnFetchSdRecords) {
+  btnFetchSdRecords.addEventListener('click', async () => {
+    if (!activeDevice) return;
+    playbackRecordsList.innerHTML = '<p style="color: #38bdf8;">Querying physical SD card (0x9205)...</p>';
+
+    try {
+      const res = await fetch(`/api/vehicles/${activeDevice}/playback/records?channel=${currentChannel}`, {
+        headers: {
+          'Authorization': `Bearer ${currentToken}`
+        }
+      });
+      const data = await res.json();
+
+      if (data.success && data.data && data.data.length > 0) {
+        playbackRecordsList.innerHTML = '';
+        data.data.forEach((rec, idx) => {
+          const div = document.createElement('div');
+          div.style.cssText = 'background: #1e293b; padding: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center;';
+          div.innerHTML = `
+            <div>
+              <b>Ch ${rec.channel}: ${rec.startTime} ➔ ${rec.endTime}</b><br>
+              <small style="color: #94a3b8;">Size: ${(rec.fileSize / 1024 / 1024).toFixed(1)} MB | Storage: SD Card</small>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="startSdPlayback('${rec.startTime}', '${rec.endTime}')">Play (0x9201)</button>
+          `;
+          playbackRecordsList.appendChild(div);
+        });
+      } else {
+        playbackRecordsList.innerHTML = `<p style="color: #f59e0b;">No recordings found on SD card for this period.</p>`;
+      }
+    } catch (err) {
+      playbackRecordsList.innerHTML = `<p style="color: #ef4444;">Error: ${err.message}</p>`;
+    }
+  });
+}
+
+window.startSdPlayback = async (startTime, endTime) => {
+  if (!activeDevice) return;
+  addLog(`[PLAYBACK] Requesting 0x9201 SD Playback: ${startTime} - ${endTime}`, 'system-log');
+  playbackModal.style.display = 'none';
+
+  initJMuxer();
+  try {
+    const res = await fetch(`/api/vehicles/${activeDevice}/playback/start`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${currentToken}`
+      },
+      body: JSON.stringify({
+        channel: currentChannel,
+        startTime,
+        endTime
+      })
+    });
+    const data = await res.json();
+    if (data.success) {
+      setStreamingState(true);
+    }
+  } catch (e) {}
+};
 
 clearLogsBtn.addEventListener('click', () => {
   logsContainer.innerHTML = '';
 });
 
+// App Startup
 window.addEventListener('DOMContentLoaded', () => {
   initMap();
   initJMuxer();

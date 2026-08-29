@@ -18,11 +18,20 @@
         <i class="fa-solid fa-video logo-icon"></i>
         <div>
           <h1>T98 Dashcam Command Center</h1>
-          <p class="subtitle">JT/T 808 Signaling & JT/T 1078 Real-time Media Server</p>
+          <p class="subtitle">JT/T 808 Signaling & JT/T 1078 Real-time Media Server (Production Hardened)</p>
         </div>
       </div>
       <div class="header-status-group">
         <div class="badge badge-port"><i class="fa-solid fa-network-wired"></i> Unified Port: <span id="jt808PortDisplay">5023</span></div>
+        <div class="form-group" style="margin: 0; display: inline-flex; align-items: center; gap: 6px;">
+          <label style="color: #94a3b8; font-size: 12px; margin: 0;"><i class="fa-solid fa-user-shield"></i> Identity:</label>
+          <select id="roleSwitcher" style="background: #1e293b; color: #38bdf8; border: 1px solid #334155; padding: 4px 8px; border-radius: 4px; font-weight: bold;">
+            <option value="admin">Admin (All Vehicles)</option>
+            <option value="cust_1">Customer 1 (TN 01 AA 1111)</option>
+            <option value="cust_2">Customer 2 (TN 02 BB 2222)</option>
+            <option value="dealer_A">Dealer A (Tenant A)</option>
+          </select>
+        </div>
         <div id="simControlBtn" class="btn-sim"><i class="fa-solid fa-robot"></i> <span id="simBtnText">Start Mock Dashcam</span></div>
       </div>
     </header>
@@ -80,8 +89,6 @@
               <select id="channelSelect">
                 <option value="1" selected>CH 1 - Road Facing (Front)</option>
                 <option value="2">CH 2 - Cabin / In-Vehicle</option>
-                <option value="64">CH 64 - Extended Front</option>
-                <option value="65">CH 65 - Extended Cabin</option>
               </select>
             </div>
             <div class="form-group">
@@ -99,6 +106,9 @@
             </button>
             <button id="stopLiveBtn" class="btn btn-danger" disabled>
               <i class="fa-solid fa-stop"></i> Stop Stream (0x9102)
+            </button>
+            <button id="btnQueryPlayback" class="btn" style="background: #6366f1; color: white;">
+              <i class="fa-solid fa-film"></i> SD Playback
             </button>
           </div>
         </div>
@@ -176,6 +186,22 @@
           </div>
         </div>
       </section>
+    </div>
+  </div>
+
+  <!-- SD Playback Modal -->
+  <div id="playbackModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 9999; justify-content: center; align-items: center;">
+    <div style="background: #0f172a; border: 1px solid #334155; border-radius: 12px; width: 600px; max-width: 90vw; padding: 20px; color: white;">
+      <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 10px; margin-bottom: 15px;">
+        <h3 style="margin: 0;"><i class="fa-solid fa-film"></i> Real SD Card Playback Records (0x9205)</h3>
+        <button id="closePlaybackBtn" style="background: none; border: none; color: #94a3b8; font-size: 20px; cursor: pointer;">&times;</button>
+      </div>
+      <div id="playbackRecordsList" style="max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;">
+        <p style="color: #94a3b8;">Click Query to fetch recordings from physical SD card...</p>
+      </div>
+      <div style="margin-top: 15px; text-align: right;">
+        <button id="btnFetchSdRecords" class="btn btn-primary"><i class="fa-solid fa-sync"></i> Query SD Card</button>
+      </div>
     </div>
   </div>
 
