@@ -97,8 +97,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// Helper: Format DB row to Flutter DashcamVehicle model
-function formatVehicleRow(row) {
+// Helper: Resolve internal SIM number from vehicleId, plate, or raw SIM
+function resolveSim(identifier) {
+  if (!identifier) return null;
+  const clean = String(identifier).trim();
+  const bySim = stmts.getVehicleBySim.get(clean);
+  if (bySim) return bySim.sim_no;
+  const byId = stmts.getVehicleById.get(clean);
+  if (byId) return byId.sim_no;
+  const byPlate = stmts.getVehicleByPlate.get(clean.toUpperCase());
+  if (byPlate) return byPlate.sim_no;
+  return clean;
+}
+
+// Helper: Format DB row to Flutter DashcamVehicle model with Role-based Privacy Sanitization
+function formatVehicleRow(row, userRole = 'admin') {
   const activeDev = jt808Servers.map(s => s.devices.get(row.sim_no)).find(Boolean);
   const isOnline = !!(activeDev && activeDev.online);
   const loc = activeDev?.location;
@@ -131,17 +144,14 @@ function formatVehicleRow(row) {
   const finalAddress = loc?.address || lastPoint?.address || '';
   const finalTime = loc?.time || lastPoint?.timestamp || row.updated_at || new Date().toISOString();
 
-  return {
+  const formatted = {
     id: row.id || row.sim_no,
+    vehicleId: row.id || row.sim_no,
     numberPlate: row.number_plate || 'UNKNOWN',
-    simNo: row.sim_no,
     model: row.model || 'T98 NON-AI 4G Dual-Cam',
     driverName: row.driver_name || '',
     driverPhone: row.driver_phone || '',
-    assignedUserId: row.assigned_user_id || '',
-    assignedUserName: row.assigned_user_name || '',
-    assignedUserPhone: row.assigned_user_phone || '',
-    tenantId: row.tenant_id || 'default',
+    cameraEnabled: true,
     channelCount: row.channel_count || 2,
     channels,
     isOnline,
@@ -162,6 +172,19 @@ function formatVehicleRow(row) {
     createdAt: row.created_at || new Date().toISOString(),
     updatedAt: row.updated_at || new Date().toISOString()
   };
+
+  // Hardware privacy masking for customers: Never expose internal physical SIM/IMEI or backend infra details
+  if (userRole === 'admin' || userRole === 'dealer') {
+    formatted.simNo = row.sim_no;
+    formatted.assignedUserId = row.assigned_user_id || '';
+    formatted.assignedUserName = row.assigned_user_name || '';
+    formatted.assignedUserPhone = row.assigned_user_phone || '';
+    formatted.tenantId = row.tenant_id || 'default';
+  } else {
+    formatted.simNo = row.id || row.number_plate; // Masked identifier for customer
+  }
+
+  return formatted;
 }
 
 // 1. Secure Server-to-Server Auth Endpoint (Requires x-api-key Header Only)
@@ -259,12 +282,26 @@ app.get('/api/vehicles', authMiddleware, (req, res) => {
     rows = stmts.getVehiclesByUser.all(caller.id, `%${caller.name || caller.id}%`);
   }
 
-  res.json({ success: true, data: rows.map(formatVehicleRow) });
+  res.json({ success: true, data: rows.map(r => formatVehicleRow(r, caller.role)) });
 });
 
 app.get('/api/vehicles/:id', authMiddleware, verifyVehicleAccess('id'), (req, res) => {
-  const vehicle = req.vehicle || stmts.getVehicleById.get(req.params.id) || stmts.getVehicleBySim.get(req.params.id);
-  res.json({ success: true, data: formatVehicleRow(vehicle) });
+  const vehicle = req.vehicle || stmts.getVehicleById.get(req.params.id) || stmts.getVehicleBySim.get(req.params.id) || stmts.getVehicleByPlate.get(req.params.id);
+  res.json({ success: true, data: formatVehicleRow(vehicle, req.user?.role) });
+});
+
+app.get('/api/vehicles/:id/status', authMiddleware, verifyVehicleAccess('id'), (req, res) => {
+  const vehicle = req.vehicle || stmts.getVehicleById.get(req.params.id) || stmts.getVehicleBySim.get(req.params.id) || stmts.getVehicleByPlate.get(req.params.id);
+  const formatted = formatVehicleRow(vehicle, req.user?.role);
+  res.json({
+    success: true,
+    vehicleId: formatted.id,
+    numberPlate: formatted.numberPlate,
+    isOnline: formatted.isOnline,
+    lastSeen: formatted.lastSeen,
+    telemetry: formatted.telemetry,
+    activeStreams: formatted.activeStreams
+  });
 });
 
 app.post('/api/vehicles', authMiddleware, requireRole(['admin', 'dealer']), (req, res) => {
@@ -408,8 +445,18 @@ app.post('/api/alarms/:id/ack', authMiddleware, (req, res) => {
 });
 
 // 6. Live Stream Signaling APIs (Authorized & Rate Limited)
-app.post('/api/vehicles/:simNo/stream/start', authMiddleware, verifyVehicleAccess('simNo'), rateLimiter({ max: 30 }), async (req, res) => {
-  const { simNo } = req.params;
+app.post(['/api/stream/start', '/api/vehicles/:simNo/stream/start'], authMiddleware, rateLimiter({ max: 30 }), async (req, res) => {
+  const targetIdentifier = req.params.simNo || req.body.vehicleId || req.body.simNo;
+  const simNo = resolveSim(targetIdentifier);
+
+  if (!simNo) {
+    return res.status(400).json({ success: false, error: 'vehicleId or simNo required' });
+  }
+
+  if (!checkWsSubscriptionPermission(req.user, simNo)) {
+    return res.status(403).json({ success: false, error: 'Forbidden: You do not have permission to stream this vehicle' });
+  }
+
   const { channel = 1, dataType = 0, streamType = 1 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
 
@@ -427,14 +474,28 @@ app.post('/api/vehicles/:simNo/stream/start', authMiddleware, verifyVehicleAcces
       streamType: parseInt(streamType, 10)
     });
 
-    res.json({ success: true, data: reqResult });
+    res.json({
+      success: true,
+      data: reqResult,
+      streamUrl: `http://${publicIp || localServerIp}:${HTTP_PORT}/player.html?sim=${simNo}&channel=${channel}&streamType=${streamType}`
+    });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/vehicles/:simNo/stream/stop', authMiddleware, verifyVehicleAccess('simNo'), (req, res) => {
-  const { simNo } = req.params;
+app.post(['/api/stream/stop', '/api/vehicles/:simNo/stream/stop'], authMiddleware, (req, res) => {
+  const targetIdentifier = req.params.simNo || req.body.vehicleId || req.body.simNo;
+  const simNo = resolveSim(targetIdentifier);
+
+  if (!simNo) {
+    return res.status(400).json({ success: false, error: 'vehicleId or simNo required' });
+  }
+
+  if (!checkWsSubscriptionPermission(req.user, simNo)) {
+    return res.status(403).json({ success: false, error: 'Forbidden: You do not own this vehicle' });
+  }
+
   const { channel = 0 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
 
@@ -447,8 +508,18 @@ app.post('/api/vehicles/:simNo/stream/stop', authMiddleware, verifyVehicleAccess
 });
 
 // 7. Real JT1078 SD Card Playback APIs (No Fake Fallbacks)
-app.get('/api/vehicles/:simNo/playback/records', authMiddleware, verifyVehicleAccess('simNo'), async (req, res) => {
-  const { simNo } = req.params;
+app.get(['/api/playback/records', '/api/vehicles/:simNo/playback/records'], authMiddleware, async (req, res) => {
+  const targetIdentifier = req.params.simNo || req.query.vehicleId || req.query.simNo;
+  const simNo = resolveSim(targetIdentifier);
+
+  if (!simNo) {
+    return res.status(400).json({ success: false, error: 'vehicleId or simNo required' });
+  }
+
+  if (!checkWsSubscriptionPermission(req.user, simNo)) {
+    return res.status(403).json({ success: false, error: 'Forbidden: You do not own this vehicle' });
+  }
+
   const channel = parseInt(req.query.channel || '1', 10);
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
 
@@ -471,8 +542,18 @@ app.get('/api/vehicles/:simNo/playback/records', authMiddleware, verifyVehicleAc
   }
 });
 
-app.post('/api/vehicles/:simNo/playback/start', authMiddleware, verifyVehicleAccess('simNo'), async (req, res) => {
-  const { simNo } = req.params;
+app.post(['/api/playback/start', '/api/vehicles/:simNo/playback/start'], authMiddleware, async (req, res) => {
+  const targetIdentifier = req.params.simNo || req.body.vehicleId || req.body.simNo;
+  const simNo = resolveSim(targetIdentifier);
+
+  if (!simNo) {
+    return res.status(400).json({ success: false, error: 'vehicleId or simNo required' });
+  }
+
+  if (!checkWsSubscriptionPermission(req.user, simNo)) {
+    return res.status(403).json({ success: false, error: 'Forbidden: You do not own this vehicle' });
+  }
+
   const { channel = 1, startTime, endTime, mode = 0, speed = 0 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
 
@@ -500,6 +581,29 @@ app.post('/api/vehicles/:simNo/playback/start', authMiddleware, verifyVehicleAcc
     if (err.code === 'DEVICE_OFFLINE') {
       return res.status(503).json({ success: false, error: 'Device is offline' });
     }
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post(['/api/playback/stop', '/api/vehicles/:simNo/playback/stop'], authMiddleware, (req, res) => {
+  const targetIdentifier = req.params.simNo || req.body.vehicleId || req.body.simNo;
+  const simNo = resolveSim(targetIdentifier);
+
+  if (!simNo) {
+    return res.status(400).json({ success: false, error: 'vehicleId or simNo required' });
+  }
+
+  if (!checkWsSubscriptionPermission(req.user, simNo)) {
+    return res.status(403).json({ success: false, error: 'Forbidden: You do not own this vehicle' });
+  }
+
+  const { channel = 0 } = req.body;
+  const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
+
+  try {
+    const stopResult = targetServer.stopLiveVideo(simNo, parseInt(channel, 10));
+    res.json({ success: true, data: stopResult });
+  } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });

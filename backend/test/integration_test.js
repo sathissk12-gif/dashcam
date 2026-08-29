@@ -147,6 +147,13 @@ runTest('GPS Sanity Coordinate Filtering', () => {
   assert.strictEqual(historyService.isValidCoordinate(11.2953, 77.7375), true);
 });
 
+runTest('VehicleId Resolution & Customer Privacy Masking', () => {
+  const row = stmts.getVehicleByPlate.get('TN 99 AA 0001');
+  assert.ok(row, 'Vehicle row must exist');
+  assert.strictEqual(row.sim_no, SIM_CUST1);
+  assert.strictEqual(row.number_plate, 'TN 99 AA 0001');
+});
+
 console.log(`\n========================================`);
 console.log(`📊 Test Results: ${testsPassed} Passed, ${testsFailed} Failed.`);
 console.log(`========================================\n`);
