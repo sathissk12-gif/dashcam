@@ -1,6 +1,7 @@
 /**
- * JT/T 808 Protocol Codec
- * Handles escaping, unescaping, XOR checksums, header parsing and building.
+ * JT/T 808 & JT/T 1078 Protocol Codec
+ * Handles escaping, unescaping, XOR checksums, header parsing, building,
+ * live video 0x9101, and SD card playback 0x9205/0x9201/0x9202.
  */
 
 function escapeBuffer(buf) {
@@ -58,7 +59,8 @@ function bcdToString(buf) {
 }
 
 function stringToBcd(str, byteLen = 6) {
-  const padded = str.padStart(byteLen * 2, '0');
+  const cleanStr = str.replace(/\D/g, '');
+  const padded = cleanStr.padStart(byteLen * 2, '0');
   const buf = Buffer.alloc(byteLen);
   for (let i = 0; i < byteLen; i++) {
     const high = parseInt(padded[i * 2], 16) || 0;
@@ -212,6 +214,96 @@ function parseLocationReport(body) {
   };
 }
 
+// JT1078 Playback Helpers
+function dateToBcd6(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const yy = String(d.getFullYear()).slice(-2);
+  const MM = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const HH = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return stringToBcd(`${yy}${MM}${dd}${HH}${mm}${ss}`, 6);
+}
+
+function build0x9205({ channel = 1, startTime, endTime, alarmFlag = 0, mediaType = 0, streamType = 0, storageType = 0 }) {
+  const body = Buffer.alloc(24);
+  body[0] = channel & 0xff;
+  dateToBcd6(startTime || new Date(Date.now() - 86400000)).copy(body, 1);
+  dateToBcd6(endTime || new Date()).copy(body, 7);
+  body.writeBigUInt64BE(BigInt(alarmFlag), 13);
+  body[21] = mediaType & 0xff;
+  body[22] = streamType & 0xff;
+  body[23] = storageType & 0xff;
+  return body;
+}
+
+function parse0x1205(body) {
+  if (body.length < 8) return { seqNo: 0, count: 0, records: [] };
+
+  const seqNo = body.readUInt16BE(0);
+  const count = body.readUInt32BE(2);
+  const records = [];
+
+  let offset = 6;
+  const itemSize = 28;
+
+  for (let i = 0; i < count && offset + itemSize <= body.length; i++) {
+    const channel = body[offset];
+    const startStr = bcdToString(body.subarray(offset + 1, offset + 7));
+    const endStr = bcdToString(body.subarray(offset + 7, offset + 13));
+    const alarmFlag = Number(body.readBigUInt64BE(offset + 13));
+    const mediaType = body[offset + 21];
+    const streamType = body[offset + 22];
+    const storageType = body[offset + 23];
+    const fileSize = body.readUInt32BE(offset + 24);
+
+    records.push({
+      channel,
+      startTime: `20${startStr.slice(0, 2)}-${startStr.slice(2, 4)}-${startStr.slice(4, 6)} ${startStr.slice(6, 8)}:${startStr.slice(8, 10)}:${startStr.slice(10, 12)}`,
+      endTime: `20${endStr.slice(0, 2)}-${endStr.slice(2, 4)}-${endStr.slice(4, 6)} ${endStr.slice(6, 8)}:${endStr.slice(8, 10)}:${endStr.slice(10, 12)}`,
+      alarmFlag,
+      mediaType,
+      streamType,
+      storageType,
+      fileSize
+    });
+
+    offset += itemSize;
+  }
+
+  return { seqNo, count, records };
+}
+
+function build0x9201({ serverIp, tcpPort = 5023, udpPort = 0, channel = 1, mediaType = 0, streamType = 1, storageType = 1, playbackMode = 0, playbackSpeed = 0, startTime, endTime }) {
+  const ipBuf = Buffer.from(serverIp, 'utf8');
+  const bodyLen = 1 + ipBuf.length + 2 + 2 + 1 + 1 + 1 + 1 + 1 + 6 + 6;
+  const body = Buffer.alloc(bodyLen);
+
+  let offset = 0;
+  body[offset++] = ipBuf.length;
+  ipBuf.copy(body, offset);
+  offset += ipBuf.length;
+
+  body.writeUInt16BE(tcpPort, offset);
+  offset += 2;
+  body.writeUInt16BE(udpPort, offset);
+  offset += 2;
+
+  body[offset++] = channel & 0xff;
+  body[offset++] = mediaType & 0xff;
+  body[offset++] = streamType & 0xff;
+  body[offset++] = storageType & 0xff;
+  body[offset++] = playbackMode & 0xff;
+  body[offset++] = playbackSpeed & 0xff;
+
+  dateToBcd6(startTime || new Date(Date.now() - 3600000)).copy(body, offset);
+  offset += 6;
+  dateToBcd6(endTime || new Date()).copy(body, offset);
+
+  return body;
+}
+
 module.exports = {
   escapeBuffer,
   unescapeBuffer,
@@ -220,5 +312,9 @@ module.exports = {
   stringToBcd,
   parseJT808Frame,
   buildJT808Packet,
-  parseLocationReport
+  parseLocationReport,
+  dateToBcd6,
+  build0x9205,
+  parse0x1205,
+  build0x9201
 };

@@ -9,6 +9,7 @@
     "sim": "node -e \"const Sim = require('./src/simulator/dashcam_sim'); new Sim().start();\""
   },
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "express": "^4.21.2",
     "ws": "^8.18.0"
   }
