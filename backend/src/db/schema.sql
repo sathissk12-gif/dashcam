@@ -1,4 +1,4 @@
--- Dashcam SQLite Production Relational Schema
+-- Dashcam SQLite Production Relational Schema with Foreign Keys and WAL Mode
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS gps_history (
     satellites INTEGER DEFAULT 0,
     signal_strength INTEGER DEFAULT 0,
     timestamp DATETIME NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(sim_no) REFERENCES vehicles(sim_no) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_gps_sim_time ON gps_history(sim_no, timestamp);
@@ -60,13 +61,14 @@ CREATE TABLE IF NOT EXISTS alarms (
     acknowledged_by TEXT DEFAULT '',
     acknowledged_at DATETIME,
     timestamp DATETIME NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(sim_no) REFERENCES vehicles(sim_no) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_alarms_sim_time ON alarms(sim_no, timestamp);
 CREATE INDEX IF NOT EXISTS idx_alarms_type ON alarms(alarm_type);
 
--- 4. Video Recordings Registry Table (SD Card & Server Archive)
+-- 4. Video Recordings Registry Table
 CREATE TABLE IF NOT EXISTS video_recordings (
     id TEXT PRIMARY KEY,
     sim_no TEXT NOT NULL,
@@ -77,18 +79,8 @@ CREATE TABLE IF NOT EXISTS video_recordings (
     file_size INTEGER DEFAULT 0,
     stream_type INTEGER DEFAULT 1,
     storage_type INTEGER DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(sim_no) REFERENCES vehicles(sim_no) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_video_sim_time ON video_recordings(sim_no, channel, start_time);
-
--- 5. API Auth Tokens Table
-CREATE TABLE IF NOT EXISTS api_tokens (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    tenant_id TEXT DEFAULT 'default',
-    role TEXT DEFAULT 'customer',
-    token_hash TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    expires_at DATETIME
-);

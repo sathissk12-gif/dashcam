@@ -1,21 +1,19 @@
 const { verifyToken, verifyApiKey } = require('../services/auth_service');
 
-const AUTH_REQUIRED = process.env.REQUIRE_AUTH === 'true';
-
 function authMiddleware(req, res, next) {
   const authHeader = req.headers['authorization'];
   const apiKeyHeader = req.headers['x-api-key'];
   const tokenQuery = req.query.token;
   const apiKeyQuery = req.query.apiKey;
 
-  // 1. API Key check
+  // 1. Check API Key
   const apiKey = apiKeyHeader || apiKeyQuery;
   if (apiKey && verifyApiKey(apiKey)) {
-    req.user = { id: 'system_api', role: 'admin', tenantId: 'default' };
+    req.user = { id: 'system_api', name: 'API Master', role: 'admin', tenantId: 'default' };
     return next();
   }
 
-  // 2. JWT Bearer token check
+  // 2. Check JWT Bearer token
   let token = null;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7).trim();
@@ -36,12 +34,7 @@ function authMiddleware(req, res, next) {
     }
   }
 
-  // 3. Fallback if auth is not strictly enforced in environment
-  if (!AUTH_REQUIRED) {
-    req.user = { id: 'anonymous', role: 'admin', tenantId: 'default' };
-    return next();
-  }
-
+  // Strict: Unauthenticated requests are rejected
   return res.status(401).json({
     success: false,
     error: 'Unauthorized: Valid Bearer token or API key required'
@@ -56,7 +49,7 @@ function requireRole(roles = []) {
     if (req.user.role === 'admin' || roles.includes(req.user.role)) {
       return next();
     }
-    return res.status(403).json({ success: false, error: 'Forbidden: Insufficient privileges' });
+    return res.status(403).json({ success: false, error: 'Forbidden: Insufficient role privileges' });
   };
 }
 

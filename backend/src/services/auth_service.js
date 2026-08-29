@@ -1,7 +1,27 @@
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 
-const SECRET_KEY = process.env.DASHCAM_SECRET_KEY || 'traxen_dashcam_secure_token_secret_key_2026';
-const API_KEY = process.env.DASHCAM_API_KEY || 'dashcam_live_key_998877';
+// Ensure .env is loaded if running in standalone script or worker
+const envPath = path.join(__dirname, '../../.env');
+if (fs.existsSync(envPath) && (!process.env.DASHCAM_SECRET_KEY || !process.env.DASHCAM_API_KEY)) {
+  const envContent = fs.readFileSync(envPath, 'utf8');
+  envContent.split('\n').forEach(line => {
+    const [key, ...vals] = line.trim().split('=');
+    if (key && !key.startsWith('#')) {
+      process.env[key.trim()] = vals.join('=').trim();
+    }
+  });
+}
+
+const SECRET_KEY = process.env.DASHCAM_SECRET_KEY;
+const API_KEY = process.env.DASHCAM_API_KEY;
+
+if (!SECRET_KEY || !API_KEY) {
+  console.error('❌ FATAL: DASHCAM_SECRET_KEY and DASHCAM_API_KEY must be defined in .env.');
+  console.error('❌ Server startup aborted to prevent unauthenticated/insecure operation.');
+  process.exit(1);
+}
 
 function base64UrlEncode(str) {
   return Buffer.from(str)
@@ -60,7 +80,7 @@ function verifyToken(token) {
   try {
     const payload = JSON.parse(base64UrlDecode(encodedPayload));
     if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-      return null; // Expired
+      return null;
     }
     return payload;
   } catch (e) {
@@ -69,6 +89,7 @@ function verifyToken(token) {
 }
 
 function verifyApiKey(key) {
+  if (!key || !API_KEY) return false;
   return key === API_KEY;
 }
 

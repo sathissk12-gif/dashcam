@@ -5,8 +5,10 @@ const { WebSocketServer, WebSocket } = require('ws');
 const os = require('os');
 const fs = require('fs');
 
-if (fs.existsSync(path.join(__dirname, '.env'))) {
-  const envContent = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+// Load environment configuration
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  const envContent = fs.readFileSync(envPath, 'utf8');
   envContent.split('\n').forEach(line => {
     const [key, ...vals] = line.trim().split('=');
     if (key && !key.startsWith('#')) {
@@ -15,13 +17,18 @@ if (fs.existsSync(path.join(__dirname, '.env'))) {
   });
 }
 
+// Enforce required security credentials at startup
+const { generateToken, verifyToken } = require('./src/services/auth_service');
+const { authMiddleware, requireRole } = require('./src/middleware/auth');
+const { verifyVehicleAccess, checkWsSubscriptionPermission } = require('./src/middleware/authorize');
+const { rateLimiter } = require('./src/middleware/rate_limiter');
 const { db, stmts } = require('./src/db/database');
 const JT808Server = require('./src/jt808/server');
 const geocoder = require('./src/utils/geocoder');
 const historyService = require('./src/services/history_service');
 const alarmService = require('./src/services/alarm_service');
-const { generateToken, verifyToken } = require('./src/services/auth_service');
-const { authMiddleware, requireRole } = require('./src/middleware/auth');
+const retentionService = require('./src/services/retention_service');
+const logger = require('./src/utils/logger');
 const { getSampleFrame } = require('./src/simulator/h264_sample');
 
 const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
@@ -50,7 +57,7 @@ async function detectPublicIp() {
     const data = await res.json();
     if (data && data.ip) {
       publicIp = data.ip;
-      console.log(`🌐 Detected Public Server IP: ${publicIp}`);
+      logger.info('PUBLIC_IP_DETECTED', { publicIp });
     }
   } catch (e) {
     publicIp = localServerIp;
@@ -65,7 +72,7 @@ app.use(express.json());
 const frontendDir = path.join(__dirname, '../frontend');
 app.use(express.static(frontendDir));
 
-// Configurable CORS whitelist
+// Production CORS whitelist
 const ALLOWED_ORIGINS = process.env.CORS_ALLOWED_ORIGINS
   ? process.env.CORS_ALLOWED_ORIGINS.split(',').map(s => s.trim())
   : ['*'];
@@ -131,18 +138,61 @@ function formatVehicleRow(row) {
   };
 }
 
-// 1. Auth Endpoint
-app.post('/api/auth/token', (req, res) => {
+// 1. Auth Endpoint (Rate Limited: 10 req/min)
+app.post('/api/auth/token', rateLimiter({ windowMs: 60000, max: 10 }), (req, res) => {
   const { userId, name, role = 'customer', tenantId = 'default' } = req.body;
   if (!userId) {
     return res.status(400).json({ success: false, error: 'userId is required' });
   }
 
   const token = generateToken({ sub: userId, name: name || userId, role, tenantId });
+  logger.info('AUTH_TOKEN_ISSUED', { userId, role, tenantId });
   res.json({ success: true, token, role, tenantId });
 });
 
-// 2. Status API
+// 2. Comprehensive Deep Health Check Endpoint
+app.get('/api/health', (req, res) => {
+  const startTime = Date.now();
+  let dbStatus = 'healthy';
+  let dbLatencyMs = 0;
+
+  try {
+    const t0 = Date.now();
+    db.prepare('SELECT 1').get();
+    dbLatencyMs = Date.now() - t0;
+  } catch (err) {
+    dbStatus = 'degraded';
+  }
+
+  const activeSockets = jt808Servers.reduce((acc, s) => acc + Array.from(s.devices.values()).filter(d => d.online).length, 0);
+  const mem = process.memoryUsage();
+
+  res.json({
+    status: dbStatus === 'healthy' ? 'healthy' : 'degraded',
+    uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    system: {
+      loadAvg: os.loadavg(),
+      freeMemMb: Math.round(os.freemem() / 1024 / 1024),
+      totalMemMb: Math.round(os.totalmem() / 1024 / 1024)
+    },
+    process: {
+      heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+      rssMb: Math.round(mem.rss / 1024 / 1024)
+    },
+    database: {
+      engine: 'SQLite (WAL Mode)',
+      status: dbStatus,
+      latencyMs: dbLatencyMs
+    },
+    gateways: {
+      jt808Port: DEFAULT_MEDIA_PORT,
+      activeDevices: activeSockets,
+      wsClients: wss.clients.size
+    }
+  });
+});
+
 app.get('/api/status', (req, res) => {
   const totalInDb = db.prepare('SELECT COUNT(*) as count FROM vehicles').get().count;
   res.json({
@@ -157,7 +207,7 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// 3. Vehicles CRUD (SQLite Backend)
+// 3. Vehicles CRUD (Strict Resource-Level Authorization)
 app.get('/api/vehicles', authMiddleware, (req, res) => {
   const { userId } = req.query;
   const caller = req.user;
@@ -176,20 +226,12 @@ app.get('/api/vehicles', authMiddleware, (req, res) => {
     rows = stmts.getVehiclesByUser.all(caller.id, `%${caller.name || caller.id}%`);
   }
 
-  res.json({
-    success: true,
-    data: rows.map(formatVehicleRow)
-  });
+  res.json({ success: true, data: rows.map(formatVehicleRow) });
 });
 
-app.get('/api/vehicles/:id', authMiddleware, (req, res) => {
-  const { id } = req.params;
-  const row = stmts.getVehicleById.get(id) || stmts.getVehicleBySim.get(id) || stmts.getVehicleByPlate.get(id);
-  if (row) {
-    res.json({ success: true, data: formatVehicleRow(row) });
-  } else {
-    res.status(404).json({ success: false, error: 'Vehicle not found' });
-  }
+app.get('/api/vehicles/:id', authMiddleware, verifyVehicleAccess('id'), (req, res) => {
+  const vehicle = req.vehicle || stmts.getVehicleById.get(req.params.id) || stmts.getVehicleBySim.get(req.params.id);
+  res.json({ success: true, data: formatVehicleRow(vehicle) });
 });
 
 app.post('/api/vehicles', authMiddleware, requireRole(['admin', 'dealer']), (req, res) => {
@@ -246,12 +288,9 @@ app.post('/api/vehicles', authMiddleware, requireRole(['admin', 'dealer']), (req
   }
 });
 
-app.put('/api/vehicles/:id', authMiddleware, requireRole(['admin', 'dealer']), (req, res) => {
+app.put('/api/vehicles/:id', authMiddleware, requireRole(['admin', 'dealer']), verifyVehicleAccess('id'), (req, res) => {
   const { id } = req.params;
-  const row = stmts.getVehicleById.get(id) || stmts.getVehicleBySim.get(id);
-  if (!row) {
-    return res.status(404).json({ success: false, error: 'Vehicle not found' });
-  }
+  const row = req.vehicle;
 
   try {
     stmts.updateVehicle.run({
@@ -286,16 +325,16 @@ app.delete('/api/vehicles/:id', authMiddleware, requireRole(['admin']), (req, re
   }
 });
 
-// 4. GPS History & Route Playback APIs
-app.get('/api/history/:simNo', authMiddleware, (req, res) => {
+// 4. GPS History & Route Playback APIs (Authorized & Paginated)
+app.get('/api/history/:simNo', authMiddleware, verifyVehicleAccess('simNo'), rateLimiter({ max: 120 }), (req, res) => {
   const { simNo } = req.params;
-  const { startTime, endTime, limit } = req.query;
+  const { startTime, endTime, limit, cursor } = req.query;
 
-  const points = historyService.getHistory(simNo, startTime, endTime, parseInt(limit || '5000', 10));
+  const points = historyService.getHistory(simNo, startTime, endTime, limit, cursor);
   res.json({ success: true, count: points.length, data: points });
 });
 
-app.get('/api/history/:simNo/summary', authMiddleware, (req, res) => {
+app.get('/api/history/:simNo/summary', authMiddleware, verifyVehicleAccess('simNo'), (req, res) => {
   const { simNo } = req.params;
   const { startTime, endTime } = req.query;
 
@@ -303,14 +342,19 @@ app.get('/api/history/:simNo/summary', authMiddleware, (req, res) => {
   res.json({ success: true, data: summary });
 });
 
-// 5. Alarms APIs
+// 5. Alarms APIs (Authorized & Tenant Isolated)
 app.get('/api/alarms', authMiddleware, (req, res) => {
   const { simNo, limit } = req.query;
   const caller = req.user;
 
   let alarms = [];
   if (simNo) {
+    if (!checkWsSubscriptionPermission(caller, simNo)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You do not own this vehicle' });
+    }
     alarms = alarmService.getAlarmsBySim(simNo, parseInt(limit || '100', 10));
+  } else if (caller.role === 'admin') {
+    alarms = stmts.getAlarmsBySim.all('%', parseInt(limit || '100', 10));
   } else {
     alarms = alarmService.getAlarmsByTenant(caller.tenantId || 'default', parseInt(limit || '100', 10));
   }
@@ -324,8 +368,8 @@ app.post('/api/alarms/:id/ack', authMiddleware, (req, res) => {
   res.json({ success });
 });
 
-// 6. Live Stream Signaling APIs
-app.post('/api/vehicles/:simNo/stream/start', authMiddleware, async (req, res) => {
+// 6. Live Stream Signaling APIs (Authorized & Rate Limited)
+app.post('/api/vehicles/:simNo/stream/start', authMiddleware, verifyVehicleAccess('simNo'), rateLimiter({ max: 30 }), async (req, res) => {
   const { simNo } = req.params;
   const { channel = 1, dataType = 0, streamType = 1 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
@@ -350,7 +394,7 @@ app.post('/api/vehicles/:simNo/stream/start', authMiddleware, async (req, res) =
   }
 });
 
-app.post('/api/vehicles/:simNo/stream/stop', authMiddleware, (req, res) => {
+app.post('/api/vehicles/:simNo/stream/stop', authMiddleware, verifyVehicleAccess('simNo'), (req, res) => {
   const { simNo } = req.params;
   const { channel = 0 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
@@ -363,50 +407,32 @@ app.post('/api/vehicles/:simNo/stream/stop', authMiddleware, (req, res) => {
   }
 });
 
-// 7. Real JT1078 SD Card Playback APIs
-app.get('/api/vehicles/:simNo/playback/records', authMiddleware, async (req, res) => {
+// 7. Real JT1078 SD Card Playback APIs (No Fake Fallbacks)
+app.get('/api/vehicles/:simNo/playback/records', authMiddleware, verifyVehicleAccess('simNo'), async (req, res) => {
   const { simNo } = req.params;
   const channel = parseInt(req.query.channel || '1', 10);
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
 
   try {
-    // 1. First attempt real JT1078 0x9205 query to physical SD card
-    const sdRecords = await targetServer.querySdRecordings(simNo, {
+    const result = await targetServer.querySdRecordings(simNo, {
       channel,
       startTime: req.query.startTime,
       endTime: req.query.endTime
     });
 
-    if (sdRecords && sdRecords.length > 0) {
-      return res.json({ success: true, source: 'sd_card', data: sdRecords });
+    res.json(result);
+  } catch (err) {
+    if (err.code === 'DEVICE_OFFLINE') {
+      return res.status(503).json({ success: false, error: 'Device is offline. Cannot query physical SD card.' });
     }
-  } catch (e) {}
-
-  // 2. Fallback to hourly intervals if SD card query is processing or device is in offline mode
-  const now = new Date();
-  const records = [];
-  const hours = [8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20];
-  const datePrefix = req.query.startTime ? req.query.startTime.substring(0, 10) : now.toISOString().substring(0, 10);
-
-  hours.forEach(h => {
-    const startHourStr = String(h).padStart(2, '0');
-    const endHourStr = String(h + 1).padStart(2, '0');
-    records.push({
-      channel: channel,
-      startTime: `${datePrefix} ${startHourStr}:00:00`,
-      endTime: `${datePrefix} ${endHourStr}:00:00`,
-      alarmFlag: 0,
-      mediaType: 0,
-      streamType: 1,
-      storageType: 1,
-      fileSize: 154820000
-    });
-  });
-
-  res.json({ success: true, source: 'timeline_cache', data: records });
+    if (err.code === 'QUERY_TIMEOUT') {
+      return res.status(504).json({ success: false, error: 'Physical SD card query timed out.' });
+    }
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
-app.post('/api/vehicles/:simNo/playback/start', authMiddleware, async (req, res) => {
+app.post('/api/vehicles/:simNo/playback/start', authMiddleware, verifyVehicleAccess('simNo'), async (req, res) => {
   const { simNo } = req.params;
   const { channel = 1, startTime, endTime, mode = 0, speed = 0 } = req.body;
   const targetServer = jt808Servers.find(s => s.devices.has(simNo)) || jt808Servers[0];
@@ -432,6 +458,9 @@ app.post('/api/vehicles/:simNo/playback/start', authMiddleware, async (req, res)
       streamUrl: `http://${publicIp || localServerIp}:${HTTP_PORT}/player.html?sim=${simNo}&channel=${channel}&streamType=1`
     });
   } catch (err) {
+    if (err.code === 'DEVICE_OFFLINE') {
+      return res.status(503).json({ success: false, error: 'Device is offline' });
+    }
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -461,36 +490,17 @@ function broadcastJson(obj) {
   });
 }
 
-function broadcastBinary(binaryData) {
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(binaryData);
-    }
-  });
-}
-
 // Unified JT808/JT1078 Server (Port 5023 primary)
 const candidateJt808Ports = [DEFAULT_MEDIA_PORT, 7788];
 const jt808Servers = candidateJt808Ports.map(p => new JT808Server({ port: p }));
-const activeJt808Ports = [];
 
 function setupJT808Handlers(serverInstance, portName) {
   serverInstance.on('packet', (data) => {
     broadcastJson({ type: 'packet_log', protocol: `JT808 (${portName})`, ...data });
   });
 
-  serverInstance.on('media_packet', (data) => {
-    broadcastJson({
-      type: 'packet_log',
-      protocol: `JT1078 (${portName})`,
-      direction: 'MEDIA',
-      msgId: `[${data.dataType}]`,
-      desc: `Ch:${data.channel} Seq:${data.seqNo} Sub:${data.subpackage} Len:${data.bodyLen}B`
-    });
-  });
-
   serverInstance.on('video_frame', (frame) => {
-    // Precise zero-copy routing to verified subscribers
+    // Precise zero-copy routing to authorized subscribers
     wss.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
         const matchesSim = !client.subscribedSim || client.subscribedSim === frame.simNo;
@@ -513,13 +523,11 @@ function setupJT808Handlers(serverInstance, portName) {
   });
 
   serverInstance.on('device_registered', ({ simNo, authCode }) => {
-    console.log(`[JT808:${portName}] Device Registered: ${simNo}`);
     broadcastJson({ type: 'device_connected', simNo, authCode });
     broadcastDeviceList();
   });
 
   serverInstance.on('device_authenticated', ({ simNo }) => {
-    console.log(`[JT808:${portName}] Device Authenticated: ${simNo}`);
     broadcastDeviceList();
   });
 
@@ -534,7 +542,6 @@ function setupJT808Handlers(serverInstance, portName) {
   });
 
   serverInstance.on('device_offline', ({ simNo }) => {
-    console.log(`[JT808:${portName}] Device Offline: ${simNo}`);
     broadcastDeviceList();
   });
 }
@@ -574,7 +581,7 @@ wss.on('connection', (ws, req) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = url.searchParams.get('token');
 
-  // Verify token if provided
+  // Verify and bind token on handshake
   if (token) {
     const user = verifyToken(token);
     if (user) {
@@ -594,7 +601,7 @@ wss.on('connection', (ws, req) => {
       const data = JSON.parse(message.toString());
       handleWsClientMessage(ws, data);
     } catch (e) {
-      console.error('[WebSocket] Invalid client message:', e.message);
+      logger.error('WS_MESSAGE_ERROR', { error: e.message });
     }
   });
 
@@ -609,6 +616,17 @@ async function handleWsClientMessage(clientWs, data) {
   const videoMediaIp = customIp || publicIp || localServerIp;
   const videoMediaPort = parseInt(mediaPort || DEFAULT_MEDIA_PORT, 10);
 
+  // Enforce resource ownership on WebSocket subscriptions
+  if (simNo && clientWs.user) {
+    const hasAccess = checkWsSubscriptionPermission(clientWs.user, simNo);
+    if (!hasAccess) {
+      return clientWs.send(JSON.stringify({
+        type: 'error',
+        message: `Forbidden: You do not have permission to view stream for SIM ${simNo}`
+      }));
+    }
+  }
+
   if (simNo) clientWs.subscribedSim = simNo;
   if (channel) clientWs.subscribedChannel = parseInt(channel, 10);
 
@@ -618,7 +636,6 @@ async function handleWsClientMessage(clientWs, data) {
       break;
 
     case 'start_test_stream': {
-      console.log(`[Test Stream] Starting 25 FPS live H.264 stream for ${simNo} Ch:${channel}...`);
       let frameIdx = 0;
       if (clientWs._testInterval) clearInterval(clientWs._testInterval);
       clientWs._testInterval = setInterval(() => {
@@ -634,7 +651,12 @@ async function handleWsClientMessage(clientWs, data) {
 
     case 'start_stream': {
       try {
-        console.log(`[Command] Requesting Live Video on ${simNo} (Target: ${videoMediaIp}:${videoMediaPort}, Channel:${channel})...`);
+        // Prepend cached SPS/PPS NALs immediately to guarantee instant decoder initialization
+        const cachedSpsPps = targetServer.getLastSpsPps(simNo, parseInt(channel, 10));
+        if (cachedSpsPps && clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(cachedSpsPps);
+        }
+
         try { targetServer.stopLiveVideo(simNo, 0); } catch (e) {}
         await new Promise(r => setTimeout(r, 200));
         try { targetServer.disableSleepMode(simNo); } catch (e) {}
@@ -661,7 +683,6 @@ async function handleWsClientMessage(clientWs, data) {
 
     case 'start_talkback': {
       try {
-        console.log(`[Talkback] Enabling Two-way Audio Intercom with ${simNo}...`);
         const reqResult = targetServer.requestLiveVideo(simNo, {
           serverIp: videoMediaIp,
           tcpPort: videoMediaPort,
@@ -688,9 +709,7 @@ async function handleWsClientMessage(clientWs, data) {
         try {
           const pcmBuf = Buffer.from(audioData, 'base64');
           targetServer.sendAudioFrame(simNo, pcmBuf, parseInt(channel, 10));
-        } catch (e) {
-          console.warn('Audio send error:', e.message);
-        }
+        } catch (e) {}
       }
       break;
     }
@@ -698,7 +717,6 @@ async function handleWsClientMessage(clientWs, data) {
     case 'stop_stream': {
       try {
         if (clientWs._testInterval) clearInterval(clientWs._testInterval);
-        console.log(`[Command] Stopping Live Video for ${simNo}...`);
         const stopResult = targetServer.stopLiveVideo(simNo, parseInt(channel || 0, 10));
         clientWs.send(JSON.stringify({ type: 'stream_stopped', ...stopResult }));
       } catch (err) {
@@ -713,25 +731,24 @@ async function startAll() {
   for (const s of jt808Servers) {
     try {
       await s.start();
-      activeJt808Ports.push(s.port);
-      console.log(`📡 Unified JT808/JT1078 Server listening on port ${s.port}`);
+      logger.info('GATEWAY_LISTENING', { port: s.port });
     } catch (e) {
-      console.warn(`Could not bind port ${s.port}: ${e.message}`);
+      logger.warn('GATEWAY_BIND_FAILED', { port: s.port, error: e.message });
     }
   }
 
   httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
-    console.log(`🚀 Web Dashboard & API available at http://0.0.0.0:${HTTP_PORT}`);
-    console.log(`🌐 Server IP for Dashcam: ${publicIp || localServerIp}`);
+    logger.info('HTTP_SERVER_STARTED', { port: HTTP_PORT, publicIp: publicIp || localServerIp });
   });
 
   try {
     altHttpServer.listen(ALT_HTTP_PORT, '0.0.0.0', () => {
-      console.log(`🚀 Alt HTTP Port listening on http://0.0.0.0:${ALT_HTTP_PORT}`);
+      logger.info('ALT_HTTP_SERVER_STARTED', { port: ALT_HTTP_PORT });
     });
   } catch (e) {}
 }
 
 startAll().catch((err) => {
-  console.error('Fatal Server Error:', err);
+  logger.error('FATAL_SERVER_ERROR', { error: err.message });
+  process.exit(1);
 });

@@ -13,16 +13,35 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
 }
 
 class HistoryService {
+  isValidCoordinate(lat, lng) {
+    if (lat === 0.0 && lng === 0.0) return false;
+    if (isNaN(lat) || isNaN(lng)) return false;
+    if (lat < -90.0 || lat > 90.0) return false;
+    if (lng < -180.0 || lng > 180.0) return false;
+    return true;
+  }
+
   recordGpsPoint(data) {
     if (!data.simNo || data.latitude === undefined || data.longitude === undefined) {
+      return;
+    }
+
+    const lat = parseFloat(data.latitude);
+    const lng = parseFloat(data.longitude);
+
+    // 1. Filter invalid / un-fixed GPS
+    if (!this.isValidCoordinate(lat, lng)) {
+      return;
+    }
+    if (data.isPositioned === false) {
       return;
     }
 
     try {
       stmts.insertGpsPoint.run({
         sim_no: data.simNo,
-        latitude: parseFloat(data.latitude) || 0.0,
-        longitude: parseFloat(data.longitude) || 0.0,
+        latitude: lat,
+        longitude: lng,
         speed_kmh: parseFloat(data.speedKmh || data.speed) || 0.0,
         direction: parseFloat(data.direction || data.course) || 0.0,
         altitude: parseFloat(data.altitude) || 0.0,
@@ -33,14 +52,16 @@ class HistoryService {
         timestamp: data.time || new Date().toISOString()
       });
     } catch (err) {
-      console.warn(`[History] Failed to record GPS point: ${err.message}`);
+      // Ignored if vehicle does not exist yet due to foreign key
     }
   }
 
-  getHistory(simNo, startTime, endTime, limit = 5000) {
+  getHistory(simNo, startTime, endTime, limit = 5000, cursor = null) {
     const start = startTime || new Date(Date.now() - 86400000).toISOString();
     const end = endTime || new Date().toISOString();
-    const rows = stmts.getGpsHistory.all(simNo, start, end, limit);
+    const cleanLimit = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 5000);
+
+    const rows = stmts.getGpsHistory.all(simNo, cursor || start, end, cleanLimit);
 
     return rows.map(r => ({
       id: r.id,
@@ -59,7 +80,7 @@ class HistoryService {
   }
 
   getTripSummary(simNo, startTime, endTime) {
-    const points = this.getHistory(simNo, startTime, endTime, 10000);
+    const points = this.getHistory(simNo, startTime, endTime, 5000);
     if (points.length === 0) {
       return {
         totalPoints: 0,
@@ -74,18 +95,32 @@ class HistoryService {
     let totalDistance = 0;
     let maxSpeed = 0;
     let speedSum = 0;
+    let validSpeedCount = 0;
 
     for (let i = 0; i < points.length; i++) {
-      if (points[i].speed > maxSpeed) maxSpeed = points[i].speed;
-      speedSum += points[i].speed;
+      const p = points[i];
+      if (p.speed > maxSpeed && p.speed <= 180) {
+        maxSpeed = p.speed;
+      }
+      if (p.speed <= 180) {
+        speedSum += p.speed;
+        validSpeedCount++;
+      }
 
       if (i > 0) {
-        totalDistance += calculateDistanceKm(
-          points[i - 1].latitude,
-          points[i - 1].longitude,
-          points[i].latitude,
-          points[i].longitude
-        );
+        const prev = points[i - 1];
+        const distKm = calculateDistanceKm(prev.latitude, prev.longitude, p.latitude, p.longitude);
+        const timeDiffSec = (new Date(p.timestamp).getTime() - new Date(prev.timestamp).getTime()) / 1000;
+
+        // GPS Jump Sanity Filter: if speed implied by jump > 180 km/h, skip jump distance
+        if (timeDiffSec > 0) {
+          const impliedSpeedKmh = (distKm / timeDiffSec) * 3600;
+          if (impliedSpeedKmh <= 180) {
+            totalDistance += distKm;
+          }
+        } else if (distKm < 0.5) {
+          totalDistance += distKm;
+        }
       }
     }
 
@@ -93,7 +128,7 @@ class HistoryService {
       totalPoints: points.length,
       totalDistanceKm: parseFloat(totalDistance.toFixed(2)),
       maxSpeedKmh: parseFloat(maxSpeed.toFixed(1)),
-      avgSpeedKmh: parseFloat((speedSum / points.length).toFixed(1)),
+      avgSpeedKmh: validSpeedCount > 0 ? parseFloat((speedSum / validSpeedCount).toFixed(1)) : 0,
       startTime: points[0].timestamp,
       endTime: points[points.length - 1].timestamp
     };
