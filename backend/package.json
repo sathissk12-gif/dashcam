@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test_system.js",
+    "test": "node test/integration_test.js",
     "sim": "node -e \"const Sim = require('./src/simulator/dashcam_sim'); new Sim().start();\""
   },
   "dependencies": {

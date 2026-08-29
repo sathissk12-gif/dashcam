@@ -4,11 +4,9 @@ function authMiddleware(req, res, next) {
   const authHeader = req.headers['authorization'];
   const apiKeyHeader = req.headers['x-api-key'];
   const tokenQuery = req.query.token;
-  const apiKeyQuery = req.query.apiKey;
 
-  // 1. Check API Key
-  const apiKey = apiKeyHeader || apiKeyQuery;
-  if (apiKey && verifyApiKey(apiKey)) {
+  // 1. Check API Key (Header only - preventing URL log leaks)
+  if (apiKeyHeader && verifyApiKey(apiKeyHeader)) {
     req.user = { id: 'system_api', name: 'API Master', role: 'admin', tenantId: 'default' };
     return next();
   }

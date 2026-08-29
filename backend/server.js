@@ -163,9 +163,9 @@ function formatVehicleRow(row) {
   };
 }
 
-// 1. Secure Server-to-Server Auth Endpoint (Requires x-api-key)
+// 1. Secure Server-to-Server Auth Endpoint (Requires x-api-key Header Only)
 app.post('/api/auth/token', rateLimiter({ windowMs: 60000, max: 20 }), (req, res) => {
-  const apiKey = req.headers['x-api-key'] || req.query.apiKey;
+  const apiKey = req.headers['x-api-key'];
   if (!apiKey || !verifyApiKey(apiKey)) {
     return res.status(401).json({
       success: false,
