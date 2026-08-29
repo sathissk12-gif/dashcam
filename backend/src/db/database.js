@@ -17,56 +17,6 @@ const schemaSql = fs.readFileSync(SCHEMA_PATH, 'utf8');
 db.exec(schemaSql);
 console.log(`🗄️ SQLite WAL Database initialized at: ${DB_PATH}`);
 
-// Auto-migrate legacy vehicles.json if present
-const LEGACY_JSON = path.join(DATA_DIR, 'vehicles.json');
-function migrateLegacyJson() {
-  try {
-    if (fs.existsSync(LEGACY_JSON)) {
-      const data = JSON.parse(fs.readFileSync(LEGACY_JSON, 'utf8'));
-      const count = db.prepare('SELECT COUNT(*) as count FROM vehicles').get().count;
-      if (count === 0 && Object.keys(data).length > 0) {
-        console.log(`🔄 Migrating ${Object.keys(data).length} vehicles from legacy vehicles.json to SQLite...`);
-        const insertStmt = db.prepare(`
-          INSERT INTO vehicles (
-            id, number_plate, sim_no, model, driver_name, driver_phone,
-            assigned_user_id, assigned_user_name, assigned_user_phone,
-            channel_count, channels_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-
-        const insertMany = db.transaction((vehicles) => {
-          for (const v of Object.values(vehicles)) {
-            if (v && v.simNo) {
-              insertStmt.run(
-                v.id || `veh_${Date.now()}_${v.simNo.slice(-4)}`,
-                v.numberPlate || 'UNKNOWN',
-                v.simNo,
-                v.model || 'T98 NON-AI 4G Dual-Cam',
-                v.driverName || '',
-                v.driverPhone || '',
-                v.assignedUserId || '',
-                v.assignedUserName || '',
-                v.assignedUserPhone || '',
-                v.channelCount || 2,
-                JSON.stringify(v.channels || []),
-                v.createdAt || new Date().toISOString(),
-                v.updatedAt || new Date().toISOString()
-              );
-            }
-          }
-        });
-
-        insertMany(data);
-        console.log(`✅ Legacy migration complete!`);
-      }
-    }
-  } catch (err) {
-    console.error('Migration error:', err.message);
-  }
-}
-
-migrateLegacyJson();
-
 // Prepared Statements for high-throughput queries
 const stmts = {
   // Vehicles
@@ -137,6 +87,11 @@ const stmts = {
       @speed_kmh, @channel, @media_url, @timestamp
     )
   `),
+  getAllAlarms: db.prepare(`
+    SELECT * FROM alarms
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `),
   getAlarmsBySim: db.prepare(`
     SELECT * FROM alarms
     WHERE sim_no = ?
@@ -149,6 +104,19 @@ const stmts = {
     WHERE v.tenant_id = ?
     ORDER BY a.timestamp DESC
     LIMIT ?
+  `),
+  getAlarmsByAssignedUser: db.prepare(`
+    SELECT a.* FROM alarms a
+    JOIN vehicles v ON a.sim_no = v.sim_no
+    WHERE v.assigned_user_id = ? OR v.assigned_user_name LIKE ?
+    ORDER BY a.timestamp DESC
+    LIMIT ?
+  `),
+  getAlarmWithVehicle: db.prepare(`
+    SELECT a.*, v.assigned_user_id, v.assigned_user_name, v.tenant_id
+    FROM alarms a
+    LEFT JOIN vehicles v ON a.sim_no = v.sim_no
+    WHERE a.id = ?
   `),
   acknowledgeAlarm: db.prepare(`
     UPDATE alarms SET

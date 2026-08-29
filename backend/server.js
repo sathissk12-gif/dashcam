@@ -17,8 +17,8 @@ if (fs.existsSync(envPath)) {
   });
 }
 
-// Enforce required security credentials at startup
-const { generateToken, verifyToken } = require('./src/services/auth_service');
+// 1. Mandatory Secrets & CORS Validation at Startup
+const { generateToken, verifyToken, verifyApiKey } = require('./src/services/auth_service');
 const { authMiddleware, requireRole } = require('./src/middleware/auth');
 const { verifyVehicleAccess, checkWsSubscriptionPermission } = require('./src/middleware/authorize');
 const { rateLimiter } = require('./src/middleware/rate_limiter');
@@ -35,6 +35,15 @@ const HTTP_PORT = parseInt(process.env.PORT || '9090', 10);
 const ALT_HTTP_PORT = 8798;
 const DEFAULT_MEDIA_PORT = parseInt(process.env.MEDIA_PORT || '5023', 10);
 let publicIp = process.env.PUBLIC_IP || null;
+
+// Enforce CORS Whitelist
+if (!process.env.CORS_ALLOWED_ORIGINS || (process.env.NODE_ENV === 'production' && process.env.CORS_ALLOWED_ORIGINS.includes('*'))) {
+  console.error('❌ FATAL: CORS_ALLOWED_ORIGINS must specify exact domain origins in production.');
+  console.error('❌ Server startup aborted to prevent wildcard CORS vulnerability.');
+  process.exit(1);
+}
+
+const ALLOWED_ORIGINS = process.env.CORS_ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean);
 
 function getLocalIp() {
   const interfaces = os.networkInterfaces();
@@ -72,15 +81,14 @@ app.use(express.json());
 const frontendDir = path.join(__dirname, '../frontend');
 app.use(express.static(frontendDir));
 
-// Production CORS whitelist
-const ALLOWED_ORIGINS = process.env.CORS_ALLOWED_ORIGINS
-  ? process.env.CORS_ALLOWED_ORIGINS.split(',').map(s => s.trim())
-  : ['*'];
-
+// Strict Origin Matching Middleware
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (ALLOWED_ORIGINS.includes('*') || (origin && ALLOWED_ORIGINS.includes(origin))) {
-    res.header('Access-Control-Allow-Origin', origin || '*');
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (!origin && ALLOWED_ORIGINS.includes('http://localhost:3000')) {
+    // Non-browser or direct curl
+    res.header('Access-Control-Allow-Origin', ALLOWED_ORIGINS[0]);
   }
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-API-Key');
@@ -138,8 +146,16 @@ function formatVehicleRow(row) {
   };
 }
 
-// 1. Auth Endpoint (Rate Limited: 10 req/min)
-app.post('/api/auth/token', rateLimiter({ windowMs: 60000, max: 10 }), (req, res) => {
+// 1. Secure Server-to-Server Auth Endpoint (Requires x-api-key)
+app.post('/api/auth/token', rateLimiter({ windowMs: 60000, max: 20 }), (req, res) => {
+  const apiKey = req.headers['x-api-key'] || req.query.apiKey;
+  if (!apiKey || !verifyApiKey(apiKey)) {
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized: Valid x-api-key header required to mint tokens'
+    });
+  }
+
   const { userId, name, role = 'customer', tenantId = 'default' } = req.body;
   if (!userId) {
     return res.status(400).json({ success: false, error: 'userId is required' });
@@ -152,7 +168,6 @@ app.post('/api/auth/token', rateLimiter({ windowMs: 60000, max: 10 }), (req, res
 
 // 2. Comprehensive Deep Health Check Endpoint
 app.get('/api/health', (req, res) => {
-  const startTime = Date.now();
   let dbStatus = 'healthy';
   let dbLatencyMs = 0;
 
@@ -342,21 +357,24 @@ app.get('/api/history/:simNo/summary', authMiddleware, verifyVehicleAccess('simN
   res.json({ success: true, data: summary });
 });
 
-// 5. Alarms APIs (Authorized & Tenant Isolated)
+// 5. Alarms APIs (Fixed SQL & Role-Isolated)
 app.get('/api/alarms', authMiddleware, (req, res) => {
   const { simNo, limit } = req.query;
   const caller = req.user;
+  const cleanLimit = parseInt(limit || '100', 10);
 
   let alarms = [];
   if (simNo) {
     if (!checkWsSubscriptionPermission(caller, simNo)) {
       return res.status(403).json({ success: false, error: 'Forbidden: You do not own this vehicle' });
     }
-    alarms = alarmService.getAlarmsBySim(simNo, parseInt(limit || '100', 10));
+    alarms = alarmService.getAlarmsBySim(simNo, cleanLimit);
   } else if (caller.role === 'admin') {
-    alarms = stmts.getAlarmsBySim.all('%', parseInt(limit || '100', 10));
+    alarms = alarmService.getAllAlarms(cleanLimit);
+  } else if (caller.role === 'dealer') {
+    alarms = alarmService.getAlarmsByTenant(caller.tenantId || 'default', cleanLimit);
   } else {
-    alarms = alarmService.getAlarmsByTenant(caller.tenantId || 'default', parseInt(limit || '100', 10));
+    alarms = alarmService.getAlarmsByUser(caller.id, caller.name, cleanLimit);
   }
 
   res.json({ success: true, count: alarms.length, data: alarms });
@@ -364,8 +382,11 @@ app.get('/api/alarms', authMiddleware, (req, res) => {
 
 app.post('/api/alarms/:id/ack', authMiddleware, (req, res) => {
   const { id } = req.params;
-  const success = alarmService.acknowledge(id, req.user?.name || req.user?.id || 'admin');
-  res.json({ success });
+  const result = alarmService.acknowledge(id, req.user);
+  if (!result.success) {
+    return res.status(result.error?.includes('Forbidden') ? 403 : 404).json(result);
+  }
+  res.json({ success: true });
 });
 
 // 6. Live Stream Signaling APIs (Authorized & Rate Limited)
@@ -500,7 +521,6 @@ function setupJT808Handlers(serverInstance, portName) {
   });
 
   serverInstance.on('video_frame', (frame) => {
-    // Precise zero-copy routing to authorized subscribers
     wss.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
         const matchesSim = !client.subscribedSim || client.subscribedSim === frame.simNo;
@@ -576,18 +596,27 @@ function broadcastDeviceList() {
   });
 }
 
-// WebSocket Connection & Subscription Security
+// Strict WebSocket Handshake Authentication (Closes 1008 on failure)
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = url.searchParams.get('token');
 
-  // Verify and bind token on handshake
-  if (token) {
-    const user = verifyToken(token);
-    if (user) {
-      ws.user = user;
-    }
+  if (!token) {
+    ws.send(JSON.stringify({ type: 'error', code: 401, message: 'Unauthorized WebSocket: Token required' }));
+    ws.close(1008, 'Token required');
+    ws.terminate();
+    return;
   }
+
+  const user = verifyToken(token);
+  if (!user) {
+    ws.send(JSON.stringify({ type: 'error', code: 401, message: 'Unauthorized WebSocket: Invalid or expired token' }));
+    ws.close(1008, 'Invalid token');
+    ws.terminate();
+    return;
+  }
+
+  ws.user = user;
 
   broadcastDeviceList();
   ws.send(JSON.stringify({
@@ -651,7 +680,6 @@ async function handleWsClientMessage(clientWs, data) {
 
     case 'start_stream': {
       try {
-        // Prepend cached SPS/PPS NALs immediately to guarantee instant decoder initialization
         const cachedSpsPps = targetServer.getLastSpsPps(simNo, parseInt(channel, 10));
         if (cachedSpsPps && clientWs.readyState === WebSocket.OPEN) {
           clientWs.send(cachedSpsPps);

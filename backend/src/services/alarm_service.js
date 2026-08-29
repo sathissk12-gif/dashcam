@@ -43,12 +43,14 @@ class AlarmService {
         timestamp: data.timestamp || data.time || new Date().toISOString()
       });
 
-      console.log(`🚨 [Alarm Stored] ${data.simNo} -> ${alarmName}`);
       return { id, simNo: data.simNo, alarmType, alarmName, timestamp: new Date().toISOString() };
     } catch (err) {
-      console.warn(`[Alarm] Failed to record alarm: ${err.message}`);
       return null;
     }
+  }
+
+  getAllAlarms(limit = 100) {
+    return stmts.getAllAlarms.all(limit);
   }
 
   getAlarmsBySim(simNo, limit = 100) {
@@ -59,12 +61,35 @@ class AlarmService {
     return stmts.getAlarmsByTenant.all(tenantId, limit);
   }
 
-  acknowledge(alarmId, acknowledgedBy = 'user') {
+  getAlarmsByUser(userId, userName, limit = 100) {
+    return stmts.getAlarmsByAssignedUser.all(userId, `%${userName || userId}%`, limit);
+  }
+
+  acknowledge(alarmId, user) {
+    if (!user) {
+      return { success: false, error: 'Unauthorized' };
+    }
+
+    const alarmRecord = stmts.getAlarmWithVehicle.get(alarmId);
+    if (!alarmRecord) {
+      return { success: false, error: 'Alarm not found' };
+    }
+
+    // Role-based ownership check
+    if (user.role !== 'admin') {
+      if (user.role === 'dealer' && alarmRecord.tenant_id !== user.tenantId) {
+        return { success: false, error: 'Forbidden: Alarm belongs to a vehicle in another tenant' };
+      }
+      if (user.role === 'customer' && alarmRecord.assigned_user_id !== user.id && alarmRecord.assigned_user_name !== user.name) {
+        return { success: false, error: 'Forbidden: You do not own the vehicle associated with this alarm' };
+      }
+    }
+
     try {
-      stmts.acknowledgeAlarm.run({ id: alarmId, acknowledged_by: acknowledgedBy });
-      return true;
+      stmts.acknowledgeAlarm.run({ id: alarmId, acknowledged_by: user.name || user.id });
+      return { success: true };
     } catch (err) {
-      return false;
+      return { success: false, error: err.message };
     }
   }
 }
