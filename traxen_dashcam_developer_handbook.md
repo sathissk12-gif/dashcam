@@ -268,52 +268,40 @@ Content-Type: application/json
 
 ## 6. Dashcam SMS Configuration Reference (For New Cameras)
 
-Depending on your dashcam firmware manufacturer variant, use either **Format A (Concox / Standard JT808 - Most Common)** or **Format B**:
+Traxen T98 4G Dashcams use the **BSJ Protocol SMS Syntax** (`<SPBSJ*P:BSJGPS*...>`). Send these exact SMS commands from any phone to the dashcam's SIM card:
 
-### 🌟 Format A: Standard JT808 / Concox / Jimi Format (Recommended)
-Send these SMS messages from any phone to the camera's SIM number:
+### 🌟 Exact BSJ Protocol Commands (Used on Traxen T98 Cameras):
 ```text
-1. Set APN (Internet Access):
-   APN,airtelgprs.com#      (For Airtel)
-   APN,jionet#              (For Jio)
-   APN,portalnmms#          (For Vodafone/Vi)
+1. Set Camera Server IP & Port (Port 5023):
+   <SPBSJ*P:BSJGPS*G:163.128.112.26,5023>
 
-2. Point to Camera VPS (Port 5023):
-   SERVER,1,163.128.112.26,5023,0#
+2. Set APN (Internet Access):
+   <SPBSJ*P:BSJGPS*A:airtelgprs.com>      (For Airtel)
+   <SPBSJ*P:BSJGPS*A:jionet>              (For Jio)
+   <SPBSJ*P:BSJGPS*A:portalnmms>          (For Vodafone/Vi)
 
-3. Set Telemetry & Heartbeat Interval (30s):
-   TIMER,30#
+3. Set Audio/Video Streaming Server:
+   <SPBSJ*P:BSJGPS*V:163.128.112.26,5023>
 
-4. Restart Dashcam to Apply Changes:
-   RESET#
+4. Set Telemetry Reporting Interval (30s):
+   <SPBSJ*P:BSJGPS*T:30>
 
-5. Check Live Camera Status:
-   PARAM#   or   STATUS#
+5. Reboot / Restart Dashcam:
+   <SPBSJ*P:BSJGPS*R>
+
+6. Query Current Camera Configuration & Status:
+   <SPBSJ*P:BSJGPS*C>
 ```
 
 ---
 
-### 🔹 Format B: Alternate Hash Format
+### 🔹 Alternative Generic JT808 / Concox Format:
 ```text
-1. Set IP and Port:
-   IP#163.128.112.26#5023#
-
-2. Set APN:
-   APN#airtelgprs.com#
-
-3. Reboot:
-   REBOOT#
-```
-
----
-
-### 🔹 Format C: T98 OEM Specific Prefix Format
-```text
-*98*#APN,airtelgprs.com#
-*98*#SERVER,163.128.112.26,5023#
-*98*#VIDEOSERVER,163.128.112.26,5023#
-*98*#INTERVAL,30#
-*98*#RESET#
+APN,airtelgprs.com#
+SERVER,1,163.128.112.26,5023,0#
+TIMER,30#
+RESET#
+STATUS#
 ```
 
 ---
