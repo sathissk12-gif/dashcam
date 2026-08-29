@@ -251,7 +251,8 @@
 
     function connectWebSocket() {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      const token = urlParams.get('token') || '';
+      const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}&viewer=true`;
 
       overlayText.textContent = `Connecting to VPS...`;
       ws = new WebSocket(wsUrl);
