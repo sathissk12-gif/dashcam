@@ -268,41 +268,52 @@ Content-Type: application/json
 
 ## 6. Dashcam SMS Configuration Reference (For New Cameras)
 
-Traxen T98 4G Dashcams use the **BSJ Protocol SMS Syntax** (`<SPBSJ*P:BSJGPS*...>`). Send these exact SMS commands from any phone to the dashcam's SIM card:
+T98 / BSJ 4G Dashcam-kku namma VPS-il connect panna **Moththam 3 Mukkiyamaana SMS** anuppa vendum:
 
-### 🌟 Exact BSJ Protocol Commands (Used on Traxen T98 Cameras):
+### 📲 Dashcam SIM Number-kku Anuppa Vendiya SMS Commands:
+
+#### 1️⃣ SMS 1: Server IP & Signaling Port Set Panna (Mandatory)
 ```text
-1. Set Camera Server IP & Port (Port 5023):
-   <SPBSJ*P:BSJGPS*G:163.128.112.26,5023>
-
-2. Set APN (Internet Access):
-   <SPBSJ*P:BSJGPS*A:airtelgprs.com>      (For Airtel)
-   <SPBSJ*P:BSJGPS*A:jionet>              (For Jio)
-   <SPBSJ*P:BSJGPS*A:portalnmms>          (For Vodafone/Vi)
-
-3. Set Audio/Video Streaming Server:
-   <SPBSJ*P:BSJGPS*V:163.128.112.26,5023>
-
-4. Set Telemetry Reporting Interval (30s):
-   <SPBSJ*P:BSJGPS*T:30>
-
-5. Reboot / Restart Dashcam:
-   <SPBSJ*P:BSJGPS*R>
-
-6. Query Current Camera Configuration & Status:
-   <SPBSJ*P:BSJGPS*C>
+<SPBSJ*P:BSJGPS*D:163.128.112.26,5023>
 ```
+* **Purpose**: Dashcam-ai Camera VPS (`163.128.112.26:5023`)-il connect panna vaikkum.
+* **Expected Reply**: `<BSJ*...*T:163.128.112.26,5023*...>`
 
 ---
 
-### 🔹 Alternative Generic JT808 / Concox Format:
+#### 2️⃣ SMS 2: Live Video Media Gateway Set Panna (Mandatory for Video)
 ```text
-APN,airtelgprs.com#
-SERVER,1,163.128.112.26,5023,0#
-TIMER,30#
-RESET#
-STATUS#
+<SPBSJ*P:BSJGPS*G:163.128.112.26:5023>
 ```
+* **Purpose**: Live H.264 video feed stream-ai direct-ah namma VPS media port 5023-kku anuppa set pannum.
+* **Expected Reply**: `<BSJ*...*G:163.128.112.26:5023*...>`
+
+---
+
+#### 3️⃣ SMS 3: ACC Always ON & Disable Sleep Mode (Recommended)
+```text
+<SPBSJ*P:BSJGPS*ACC:1>
+```
+```text
+<SPBSJ*P:BSJGPS*SLEEP:0>
+```
+* **Purpose**: Vehicle key OFF-il irundhaalum camera sleep aagaama continuous-ah live stream & tracking-kku ready-ah vekkum.
+
+---
+
+#### 🔍 (Optional) Dashcam Status Check Panna:
+```text
+<SPBSJ*P:BSJGPS*Q>
+```
+* Dashcam SMS reply anuppum (Server IP, 4G Signal, GPS satellites, IMEI status).
+
+---
+
+> 💡 **Note**: Oruvelai ungal Dashcam standard format use panninaal:
+> * `IP#163.128.112.26#5023#`
+> * `SERVER,1,163.128.112.26,5023,0#`
+>
+> Normal-ah T98 / BSJ models-kku mela ulla **`<SPBSJ*P:BSJGPS*...>`** format 100% work aagum!
 
 ---
 
