@@ -268,23 +268,52 @@ Content-Type: application/json
 
 ## 6. Dashcam SMS Configuration Reference (For New Cameras)
 
-To configure any new 4G Dashcam out of the box, send these SMS commands from any mobile phone to the Dashcam's SIM number:
+Depending on your dashcam firmware manufacturer variant, use either **Format A (Concox / Standard JT808 - Most Common)** or **Format B**:
 
+### 🌟 Format A: Standard JT808 / Concox / Jimi Format (Recommended)
+Send these SMS messages from any phone to the camera's SIM number:
 ```text
-1. Set APN (e.g. Airtel / Jio / Vodafone):
-   *98*#APN,airtelgprs.com#
+1. Set APN (Internet Access):
+   APN,airtelgprs.com#      (For Airtel)
+   APN,jionet#              (For Jio)
+   APN,portalnmms#          (For Vodafone/Vi)
 
-2. Set Camera Server IP and JT808 Port:
-   *98*#SERVER,163.128.112.26,5023#
+2. Point to Camera VPS (Port 5023):
+   SERVER,1,163.128.112.26,5023,0#
 
-3. Set Audio/Video Media Server IP and Port:
-   *98*#VIDEOSERVER,163.128.112.26,5023#
+3. Set Telemetry & Heartbeat Interval (30s):
+   TIMER,30#
 
-4. Set Heartbeat Interval to 30s:
-   *98*#INTERVAL,30#
+4. Restart Dashcam to Apply Changes:
+   RESET#
 
-5. Reboot Camera to Apply:
-   *98*#RESET#
+5. Check Live Camera Status:
+   PARAM#   or   STATUS#
+```
+
+---
+
+### 🔹 Format B: Alternate Hash Format
+```text
+1. Set IP and Port:
+   IP#163.128.112.26#5023#
+
+2. Set APN:
+   APN#airtelgprs.com#
+
+3. Reboot:
+   REBOOT#
+```
+
+---
+
+### 🔹 Format C: T98 OEM Specific Prefix Format
+```text
+*98*#APN,airtelgprs.com#
+*98*#SERVER,163.128.112.26,5023#
+*98*#VIDEOSERVER,163.128.112.26,5023#
+*98*#INTERVAL,30#
+*98*#RESET#
 ```
 
 ---
