@@ -213,30 +213,26 @@ class JT808Server extends EventEmitter {
           firstTime: Date.now()
         });
       } else {
-        const state = this.frameAssemblers.get(streamKey);
-        if (state) {
-          // Check for sequence gap
-          const expectedSeq = (state.lastSeq + 1) & 0xffff;
-          if (seqNo !== expectedSeq) {
-            // Sequence gap detected: discard corrupted assembler
-            this.frameAssemblers.delete(streamKey);
-            return;
-          }
-
+        let state = this.frameAssemblers.get(streamKey);
+        if (!state) {
+          // If middle packet arrived without subpackage 1, start new buffer
+          state = { chunks: [payload], lastSeq: seqNo, firstTime: Date.now() };
+          this.frameAssemblers.set(streamKey, state);
+        } else {
           state.chunks.push(payload);
           state.lastSeq = seqNo;
+        }
 
-          if (meta.subpackage === 3) {
-            // Concluding chunk
-            this.frameAssemblers.delete(streamKey);
-            const fullFrame = Buffer.concat(state.chunks);
-            this.emit('video_frame', {
-              simNo,
-              channel,
-              isKeyframe,
-              data: fullFrame
-            });
-          }
+        if (meta.subpackage === 3) {
+          // Concluding chunk: emit full frame
+          this.frameAssemblers.delete(streamKey);
+          const fullFrame = Buffer.concat(state.chunks);
+          this.emit('video_frame', {
+            simNo,
+            channel,
+            isKeyframe,
+            data: fullFrame
+          });
         }
       }
     } else if (meta.isAudio) {

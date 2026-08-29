@@ -180,12 +180,22 @@
         console.error('JMuxer init failed:', e);
       }
 
+      // Smooth Dynamic Catch-Up (Prevents seeking stutter and continuous micro-freezes)
       playerEl.addEventListener('timeupdate', () => {
         if (playerEl.buffered && playerEl.buffered.length > 0) {
           const bufferEnd = playerEl.buffered.end(playerEl.buffered.length - 1);
           const lag = bufferEnd - playerEl.currentTime;
-          if (lag > 0.35) {
-            playerEl.currentTime = bufferEnd - 0.05;
+
+          if (lag > 2.0) {
+            // Severe network lag (>2s): Hard seek to live edge
+            playerEl.currentTime = bufferEnd - 0.1;
+            playerEl.playbackRate = 1.0;
+          } else if (lag > 0.4) {
+            // Minor drift (0.4s - 2.0s): Smoothly speed up by 15% without decoder stutter
+            playerEl.playbackRate = 1.15;
+          } else if (lag < 0.15) {
+            // Caught up to real-time: Resume normal 1.0x speed
+            playerEl.playbackRate = 1.0;
           }
         }
       });
