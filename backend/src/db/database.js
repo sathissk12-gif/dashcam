@@ -147,6 +147,62 @@ const stmts = {
   `)
 };
 
+// Seed default physical dashcam devices if not present
+function seedDefaultVehicles() {
+  const seedDevices = [
+    {
+      id: 'veh_015770054447',
+      number_plate: 'TN 38 AB 1234',
+      sim_no: '015770054447',
+      model: 'T98 NON-AI 4G Dual-Cam',
+      driver_name: 'Driver 1',
+      driver_phone: '+91 98765 43210',
+      assigned_user_id: 'user_cust_1',
+      assigned_user_name: 'Customer One',
+      assigned_user_phone: '+91 98765 43210',
+      tenant_id: 'tenant_A',
+      channel_count: 2,
+      channels_json: JSON.stringify([
+        { id: 1, name: 'Channel 1 (Front Road)', enabled: true },
+        { id: 2, name: 'Channel 2 (Cabin / Driver)', enabled: true }
+      ]),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    },
+    {
+      id: 'veh_015770060120',
+      number_plate: 'TN 37 XY 4567',
+      sim_no: '015770060120',
+      model: 'T98 NON-AI 4G Dual-Cam',
+      driver_name: 'Driver 2',
+      driver_phone: '+91 98765 43211',
+      assigned_user_id: 'user_cust_2',
+      assigned_user_name: 'Customer Two',
+      assigned_user_phone: '+91 98765 43211',
+      tenant_id: 'tenant_A',
+      channel_count: 2,
+      channels_json: JSON.stringify([
+        { id: 1, name: 'Channel 1 (Front Road)', enabled: true },
+        { id: 2, name: 'Channel 2 (Cabin / Driver)', enabled: true }
+      ]),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }
+  ];
+
+  for (const v of seedDevices) {
+    const existing = stmts.getVehicleBySim.get(v.sim_no);
+    if (!existing) {
+      stmts.insertVehicle.run(v);
+      console.log(`🚗 Seeded vehicle: ${v.number_plate} (SIM: ${v.sim_no})`);
+    }
+  }
+}
+
+try {
+  seedDefaultVehicles();
+} catch (e) {}
+
 module.exports = {
   db,
   stmts
