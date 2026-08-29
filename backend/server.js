@@ -560,7 +560,11 @@ function setupJT808Handlers(serverInstance, portName) {
   });
 
   serverInstance.on('device_registered', ({ simNo, authCode }) => {
-    broadcastJson({ type: 'device_connected', simNo, authCode });
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN && client.user && checkWsSubscriptionPermission(client.user, simNo)) {
+        client.send(JSON.stringify({ type: 'device_connected', simNo, authCode }));
+      }
+    });
     broadcastDeviceList();
   });
 
@@ -575,7 +579,16 @@ function setupJT808Handlers(serverInstance, portName) {
     } catch (e) {}
 
     locData.address = address;
-    broadcastJson({ type: 'device_location', ...locData, address });
+    const locationPayload = JSON.stringify({ type: 'device_location', ...locData, address });
+    
+    // Only send telemetry to clients authorized for this vehicle
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN && client.user) {
+        if (checkWsSubscriptionPermission(client.user, locData.simNo)) {
+          client.send(locationPayload);
+        }
+      }
+    });
   });
 
   serverInstance.on('device_offline', ({ simNo }) => {
@@ -587,11 +600,29 @@ jt808Servers.forEach((serverInstance, idx) => {
   setupJT808Handlers(serverInstance, candidateJt808Ports[idx]);
 });
 
-function broadcastDeviceList() {
+// Per-User/Per-Tenant WebSocket Device List Dispatch
+function sendDeviceListToClient(ws) {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !ws.user) return;
+
+  const caller = ws.user;
+  let vehicleRows = [];
+
+  if (caller.role === 'admin') {
+    vehicleRows = stmts.getAllVehicles.all();
+  } else if (caller.role === 'dealer') {
+    vehicleRows = stmts.getVehiclesByTenant.all(caller.tenantId || 'default');
+  } else {
+    // Customer sees only assigned vehicles
+    vehicleRows = stmts.getVehiclesByUser.all(caller.id, `%${caller.name || caller.id}%`);
+  }
+
+  const vehicles = vehicleRows.map(formatVehicleRow);
+  const allowedSimSet = new Set(vehicles.map(v => v.simNo));
+
   const devices = [];
   jt808Servers.forEach((server) => {
     server.devices.forEach((dev, simNo) => {
-      if (!devices.some(d => d.simNo === simNo)) {
+      if (allowedSimSet.has(simNo) && !devices.some(d => d.simNo === simNo)) {
         devices.push({
           simNo,
           online: dev.online,
@@ -604,12 +635,19 @@ function broadcastDeviceList() {
     });
   });
 
-  const vehicles = stmts.getAllVehicles.all().map(formatVehicleRow);
-  broadcastJson({
+  ws.send(JSON.stringify({
     type: 'device_list',
     devices,
     serverIp: publicIp || localServerIp,
     vehicles
+  }));
+}
+
+function broadcastDeviceList() {
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN && client.user) {
+      sendDeviceListToClient(client);
+    }
   });
 }
 
@@ -635,7 +673,8 @@ wss.on('connection', (ws, req) => {
 
   ws.user = user;
 
-  broadcastDeviceList();
+  // Send initial filtered device list directly to this authenticated client
+  sendDeviceListToClient(ws);
   ws.send(JSON.stringify({
     type: 'server_info',
     serverIp: publicIp || localServerIp,
