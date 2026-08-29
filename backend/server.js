@@ -102,6 +102,14 @@ function formatVehicleRow(row) {
   const isOnline = !!(activeDev && activeDev.online);
   const loc = activeDev?.location;
 
+  // If live location is unavailable in memory (device offline), query latest GPS point from SQLite DB
+  let lastPoint = null;
+  if (!loc) {
+    try {
+      lastPoint = stmts.getLatestGpsPoint.get(row.sim_no);
+    } catch (e) {}
+  }
+
   let channels = [
     { id: 1, name: 'Channel 1 (Front Road)', enabled: true },
     { id: 2, name: 'Channel 2 (Cabin / Driver)', enabled: true }
@@ -112,6 +120,15 @@ function formatVehicleRow(row) {
       channels = JSON.parse(row.channels_json);
     }
   } catch (e) {}
+
+  const finalLat = loc?.latitude || lastPoint?.latitude || 11.295318;
+  const finalLng = loc?.longitude || lastPoint?.longitude || 77.737556;
+  const finalSpeed = loc?.speedKmh !== undefined ? loc.speedKmh : (lastPoint?.speed_kmh || 0.0);
+  const finalCourse = loc?.direction !== undefined ? loc.direction : (lastPoint?.direction || 0.0);
+  const finalAltitude = loc?.altitude !== undefined ? loc.altitude : (lastPoint?.altitude || 0.0);
+  const finalAcc = loc?.accOn !== undefined ? loc.accOn : (lastPoint?.acc_on === 1);
+  const finalAddress = loc?.address || lastPoint?.address || '';
+  const finalTime = loc?.time || lastPoint?.timestamp || row.updated_at || new Date().toISOString();
 
   return {
     id: row.id || row.sim_no,
@@ -128,16 +145,16 @@ function formatVehicleRow(row) {
     channels,
     isOnline,
     isDeviceConnected: isOnline,
-    lastSeen: activeDev?.lastSeen?.toISOString() || row.updated_at || new Date().toISOString(),
+    lastSeen: activeDev?.lastSeen?.toISOString() || lastPoint?.timestamp || row.updated_at || new Date().toISOString(),
     telemetry: {
-      latitude: loc?.latitude || 11.295318,
-      longitude: loc?.longitude || 77.737556,
-      speed: loc?.speedKmh || 0.0,
-      course: loc?.direction || 0.0,
-      altitude: loc?.altitude || 0.0,
-      acc: loc?.accOn ?? false,
-      address: loc?.address || '',
-      lastUpdate: loc?.time || new Date().toISOString()
+      latitude: finalLat,
+      longitude: finalLng,
+      speed: finalSpeed,
+      course: finalCourse,
+      altitude: finalAltitude,
+      acc: finalAcc,
+      address: finalAddress,
+      lastUpdate: finalTime
     },
     activeStreams: activeDev?.activeChannel ? [activeDev.activeChannel] : [],
     alarms: [],
