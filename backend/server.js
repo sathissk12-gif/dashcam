@@ -28,6 +28,7 @@ const geocoder = require('./src/utils/geocoder');
 const historyService = require('./src/services/history_service');
 const alarmService = require('./src/services/alarm_service');
 const retentionService = require('./src/services/retention_service');
+const backupService = require('./src/services/backup_service');
 const logger = require('./src/utils/logger');
 const { getSampleFrame } = require('./src/simulator/h264_sample');
 
@@ -717,7 +718,7 @@ async function handleWsClientMessage(clientWs, data) {
 
   switch (action) {
     case 'get_devices':
-      broadcastDeviceList();
+      sendDeviceListToClient(clientWs);
       break;
 
     case 'start_test_stream': {
